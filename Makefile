@@ -17,7 +17,7 @@ $(TWEAK_NAME)_FILES = Tweak.xm
 $(TWEAK_NAME)_FRAMEWORKS = UIKit Foundation CoreGraphics QuartzCore
 
 # 启用ARC
-$(TWEAK_NAME)_CFLAGS = -fobjc-arc -Wno-c99-designator
+$(TWEAK_NAME)_CFLAGS = -fobjc-arc -Wno-c99-designator -Wno-unused-variable
 
 # CFNetwork用于网络请求
 $(TWEAK_NAME)_LIBRARIES = substrate

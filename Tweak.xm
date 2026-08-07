@@ -607,11 +607,7 @@ static UIColor *MCColorForFeature(MCTFeature feature) {
 - (BOOL)isJumping;
 @end
 
-// 一些辅助C函数
-static float g_originalSpeed = 0.0;
-static float g_originalReach = 0.0;
-static float g_originalGamma = -1.0;
-static BOOL g_hasInitializedOriginals = NO;
+// 一些辅助C函数 (预留用于保存原始值)
 
 // ==================== 钩子: AppDelegate 初始化 ====================
 
