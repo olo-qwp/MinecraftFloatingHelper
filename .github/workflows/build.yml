@@ -86,10 +86,12 @@ jobs:
         if-no-files-found: warn
         retention-days: 30
 
-  # 发布到GitHub Release
+  # 发布到GitHub Release (使用GITHUB_TOKEN自动获取权限)
   release:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
     
     steps:
@@ -102,42 +104,38 @@ jobs:
     - name: List Packages
       run: ls -la ./packages/
 
-    - name: Create Release
-      id: create_release
-      uses: softprops/action-gh-release@v2
-      with:
-        name: "MinecraftFloatingHelper v1.0.0"
-        tag_name: "v1.0.0"
-        body: |
-          # Minecraft Floating Helper v1.0.0
+    - name: Create Release with gh CLI
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        gh release create v1.0.0 \
+          ./packages/*.deb \
+          --title "MinecraftFloatingHelper v1.0.0" \
+          --notes "## Minecraft Floating Helper v1.0.0
 
-          🎮 iOS Minecraft PE 悬浮窗多功能辅助工具
+        🎮 iOS Minecraft PE 悬浮窗多功能辅助工具
 
-          ## ✨ 13项功能
-          - 🪶 **飞行** - 自由飞行模式
-          - ⚡ **加速** - 3.5倍移动速度
-          - ⚔️ **杀戮光环** - 自动攻击附近敌人
-          - 👁️ **ESP透视** - 透视实体位置
-          - 💎 **矿透X-Ray** - 透视矿物方块
-          - 🛡️ **防摔** - 免疫摔落伤害
-          - ⛏️ **自动挖矿** - 快速破坏方块
-          - 🍖 **自动吃** - 自动补充饱食度
-          - 📏 **范围扩大** - 增加交互距离
-          - 🧱 **防击退** - 免疫击退效果
-          - ☀️ **夜视** - 永久明亮视野
-          - 🔧 **自动工具** - 自动切换最佳工具
-          - 👻 **穿墙** - 穿越方块移动
+        ### ✨ 13项功能
+        - 🪶 **飞行** - 自由飞行模式
+        - ⚡ **加速** - 3.5倍移动速度
+        - ⚔️ **杀戮光环** - 自动攻击附近敌人
+        - 👁️ **ESP透视** - 透视实体位置
+        - 💎 **矿透X-Ray** - 透视矿物方块
+        - 🛡️ **防摔** - 免疫摔落伤害
+        - ⛏️ **自动挖矿** - 快速破坏方块
+        - 🍖 **自动吃** - 自动补充饱食度
+        - 📏 **范围扩大** - 增加交互距离
+        - 🧱 **防击退** - 免疫击退效果
+        - ☀️ **夜视** - 永久明亮视野
+        - 🔧 **自动工具** - 自动切换最佳工具
+        - 👻 **穿墙** - 穿越方块移动
 
-          ## 📦 包含
-          - `*_iphoneos-arm.deb` - Rootful模式 (传统越狱)
-          - `*_iphoneos-arm64e.deb` - Rootless模式 (iOS 15+)
+        ### 📦 包含
+        - \`*_iphoneos-arm.deb\` - Rootful模式 (传统越狱)
+        - \`*_iphoneos-arm64.deb\` - Rootless模式 (iOS 15+)
 
-          ## ⚙️ 兼容性
-          - A11芯片 (iPhone 8/X) 60fps流畅运行
-          - iOS 13+
-          - 支持iGameGod导入
-        files: |
-          ./packages/*.deb
-        draft: false
-        prerelease: false
-        generate_release_notes: false
+        ### ⚙️ 兼容性
+        - A11芯片 (iPhone 8/X) 60fps流畅运行
+        - iOS 13+
+        - 支持iGameGod导入" \
+          --repo ${{ github.repository }} || true
