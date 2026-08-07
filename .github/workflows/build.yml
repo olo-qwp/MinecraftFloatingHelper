@@ -50,17 +50,7 @@ jobs:
         echo "THEOS=$GITHUB_WORKSPACE/theos" >> $GITHUB_ENV
         echo "$GITHUB_WORKSPACE/theos/bin" >> $GITHUB_PATH
 
-    - name: Build Rootful Package (arm64 arm64e)
-      run: |
-        cd MinecraftTweak
-        export THEOS=$GITHUB_WORKSPACE/theos
-        # 默认scheme即为rootful (iphoneos-arm)
-        gmake clean package FINALPACKAGE=1 \
-          ARCHS="arm64 arm64e" \
-          TARGET="iphone:clang:latest:13.0"
-        echo "✅ Rootful 编译完成"
-
-    - name: Build Rootless Package (arm64 arm64e)
+    - name: Build Rootless Package (Dopamine arm64 arm64e)
       run: |
         cd MinecraftTweak
         export THEOS=$GITHUB_WORKSPACE/theos
@@ -68,7 +58,7 @@ jobs:
           THEOS_PACKAGE_SCHEME=rootless \
           ARCHS="arm64 arm64e" \
           TARGET="iphone:clang:latest:15.0"
-        echo "✅ Rootless 编译完成"
+        echo "✅ Dopamine 编译完成"
 
     - name: List Built Packages
       run: |
@@ -108,12 +98,18 @@ jobs:
       env:
         GH_TOKEN: ${{ github.token }}
       run: |
-        gh release create v1.0.0 \
+        gh release create v1.0.1 \
           ./packages/*.deb \
-          --title "MinecraftFloatingHelper v1.0.0" \
-          --notes "## Minecraft Floating Helper v1.0.0
+          --title "MinecraftFloatingHelper v1.0.1" \
+          --notes "## Minecraft Floating Helper v1.0.1
 
-        🎮 iOS Minecraft PE 悬浮窗多功能辅助工具
+        🎮 iOS Minecraft PE 悬浮窗多功能辅助工具 — Dopamine 版
+
+        ### 修复
+        - 修复UI不显示的bug — 重写初始化逻辑，4种加载方式保障
+        - 改用UIScrollView手动布局，避免TableView代理问题
+        - 专注Dopamine rootless (iOS 15+)
+        - 简化plist过滤器，兼容ElleKit注入
 
         ### ✨ 13项功能
         - 🪶 **飞行** - 自由飞行模式
@@ -130,12 +126,13 @@ jobs:
         - 🔧 **自动工具** - 自动切换最佳工具
         - 👻 **穿墙** - 穿越方块移动
 
-        ### 📦 包含
-        - \`*_iphoneos-arm.deb\` - Rootful模式 (传统越狱)
-        - \`*_iphoneos-arm64.deb\` - Rootless模式 (iOS 15+)
+        ### 📦 安装
+        - 下载 .deb 文件
+        - 通过 Sileo / Zebra 安装
+        - 或通过 iGameGod 导入
 
         ### ⚙️ 兼容性
-        - A11芯片 (iPhone 8/X) 60fps流畅运行
-        - iOS 13+
-        - 支持iGameGod导入" \
+        - Dopamine rootless (iOS 15+)
+        - A11芯片 (iPhone 8/X) 60fps
+        - 加载器: ElleKit" \
           --repo ${{ github.repository }} || true

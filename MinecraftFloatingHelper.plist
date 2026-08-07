@@ -8,11 +8,6 @@
         <array>
             <string>com.mojang.minecraftpe</string>
         </array>
-        <key>Classes</key>
-        <array>
-            <string>AppDelegate</string>
-            <string>MinecraftClient</string>
-        </array>
     </dict>
 </dict>
 </plist>
