@@ -54,8 +54,8 @@ jobs:
       run: |
         cd MinecraftTweak
         export THEOS=$GITHUB_WORKSPACE/theos
+        # 默认scheme即为rootful (iphoneos-arm)
         gmake clean package FINALPACKAGE=1 \
-          THEOS_PACKAGE_SCHEME=rootful \
           ARCHS="arm64 arm64e" \
           TARGET="iphone:clang:latest:13.0"
         echo "✅ Rootful 编译完成"
