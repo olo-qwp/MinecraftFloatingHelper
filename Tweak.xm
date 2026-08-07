@@ -3,6 +3,9 @@
  * 专注Dopamine (rootless) 版本
  * 兼容A11芯片 (iPhone 8/X), iOS 15+, 60fps
  * 13项功能: 飞行/加速/杀戮光环/ESP透视/X-Ray/防摔/自动挖矿/自动吃/范围扩大/防击退/夜视/自动工具/穿墙
+ *
+ * 关键方案: 直接添加到keyWindow，不创建独立UIWindow
+ * 这是最可靠的悬浮窗显示方式，避免UIWindow场景兼容性问题
  */
 
 #import <UIKit/UIKit.h>
@@ -65,10 +68,10 @@ static NSString * const kFeatureIcons[] = {
 
 static BOOL g_featureEnabled[MCTFeatureCount] = {NO};
 static BOOL g_tweakReady = NO;
-static UIWindow *g_floatingWindow = nil;
 static UIButton *g_floatingBtn = nil;
 static UIView *g_menuPanel = nil;
 static BOOL g_menuVisible = NO;
+static UIWindow *g_targetWindow = nil;  // 目标窗口，找到后缓存
 
 #pragma mark - ==================== 颜色定义 ====================
 
@@ -95,10 +98,41 @@ static UIColor *MCColorForFeature(MCTFeature f) {
     }
 }
 
-#pragma mark - ==================== 悬浮窗管理器 ====================
+/// 获取当前App最上层的窗口，用于添加悬浮窗
+static UIWindow *MCGetTargetWindow(void) {
+    if (g_targetWindow && !g_targetWindow.hidden) {
+        return g_targetWindow;
+    }
+    
+    // 尝试获取keyWindow
+    UIWindow *keyWin = [UIApplication sharedApplication].keyWindow;
+    if (keyWin && !keyWin.hidden) {
+        g_targetWindow = keyWin;
+        return keyWin;
+    }
+    
+    // 后备：遍历所有窗口，取最上层可见窗口
+    NSArray *windows = [UIApplication sharedApplication].windows;
+    for (UIWindow *win in [windows reverseObjectEnumerator]) {
+        if (!win.hidden && win.windowLevel >= UIWindowLevelNormal) {
+            // 跳过我们自己的窗口（如果有）
+            g_targetWindow = win;
+            return win;
+        }
+    }
+    
+    // 最后尝试
+    if (windows.count > 0) {
+        g_targetWindow = windows[0];
+        return windows[0];
+    }
+    
+    return nil;
+}
+
+#pragma mark - ==================== 悬浮窗管理 ====================
 
 @interface MCFloatingManager : NSObject
-@property (nonatomic, strong) UIWindow *window;
 @property (nonatomic, strong) UIButton *floatingBtn;
 @property (nonatomic, strong) UIView *menuView;
 @property (nonatomic, assign) BOOL menuVisible;
@@ -119,25 +153,22 @@ static UIColor *MCColorForFeature(MCTFeature f) {
 }
 
 - (void)setup {
-    if (self.window) return;
+    if (self.floatingBtn) return;
+    
+    UIWindow *targetWin = MCGetTargetWindow();
+    if (!targetWin) {
+        NSLog(@"[MCTweak] 无法获取目标窗口，延迟重试");
+        // 延迟重试
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [self setup];
+        });
+        return;
+    }
     
     CGFloat sw = [UIScreen mainScreen].bounds.size.width;
     CGFloat sh = [UIScreen mainScreen].bounds.size.height;
     
-    // 创建UIWindow - 使用足够高的层级盖住游戏画面
-    UIWindow *win = [[UIWindow alloc] initWithFrame:CGRectMake(0, 0, sw, sh)];
-    win.windowLevel = UIWindowLevelAlert + 200;  // 足够高，覆盖游戏渲染
-    win.backgroundColor = [UIColor clearColor];
-    win.userInteractionEnabled = YES;
-    win.hidden = NO;
-    
-    // 根控制器 - 用于处理旋转
-    UIViewController *rootVC = [[UIViewController alloc] init];
-    rootVC.view.backgroundColor = [UIColor clearColor];
-    rootVC.view.userInteractionEnabled = NO;
-    win.rootViewController = rootVC;
-    
-    // 悬浮按钮
+    // 悬浮按钮 - 直接添加到目标窗口
     CGFloat btnSize = 52;
     CGFloat margin = 16;
     UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
@@ -154,23 +185,30 @@ static UIColor *MCColorForFeature(MCTFeature f) {
     [btn setTitle:@"⛏" forState:UIControlStateNormal];
     [btn addTarget:self action:@selector(btnTapped) forControlEvents:UIControlEventTouchUpInside];
     
+    // 确保按钮在最上层
+    btn.layer.zPosition = 9999;
+    
     // 拖拽手势
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(btnDragged:)];
     [btn addGestureRecognizer:pan];
     
-    [win addSubview:btn];
+    [targetWin addSubview:btn];
     
-    self.window = win;
     self.floatingBtn = btn;
+    g_floatingBtn = btn;
+    g_targetWindow = targetWin;
     
-    NSLog(@"[MCTweak] 悬浮窗窗口已创建 windowLevel=%.0f", win.windowLevel);
+    NSLog(@"[MCTweak] 悬浮按钮已添加到目标窗口 %@", targetWin);
 }
 
 - (void)show {
     MCExecOnMain(^{
         [self setup];
-        self.window.hidden = NO;
-        [self.window makeKeyAndVisible];
+        if (!self.floatingBtn) return;
+        
+        // 确保按钮可见
+        self.floatingBtn.hidden = NO;
+        [self.floatingBtn.superview bringSubviewToFront:self.floatingBtn];
         
         // 入场动画
         self.floatingBtn.transform = CGAffineTransformMakeScale(0.3, 0.3);
@@ -189,7 +227,11 @@ static UIColor *MCColorForFeature(MCTFeature f) {
         [self.menuView removeFromSuperview];
         self.menuView = nil;
         self.menuVisible = NO;
-        self.window.hidden = YES;
+        g_menuVisible = NO;
+        self.floatingBtn.hidden = YES;
+        [self.floatingBtn removeFromSuperview];
+        self.floatingBtn = nil;
+        g_floatingBtn = nil;
     });
 }
 
@@ -228,6 +270,12 @@ static UIColor *MCColorForFeature(MCTFeature f) {
 - (void)showMenu {
     if (self.menuVisible) return;
     self.menuVisible = YES;
+    g_menuVisible = YES;
+    
+    // 获取目标窗口
+    UIWindow *targetWin = g_targetWindow;
+    if (!targetWin) targetWin = MCGetTargetWindow();
+    if (!targetWin) return;
     
     CGFloat sw = [UIScreen mainScreen].bounds.size.width;
     CGFloat sh = [UIScreen mainScreen].bounds.size.height;
@@ -238,11 +286,13 @@ static UIColor *MCColorForFeature(MCTFeature f) {
     
     // 遮罩层
     UIButton *overlay = [UIButton buttonWithType:UIButtonTypeCustom];
-    overlay.frame = self.window.bounds;
+    overlay.frame = targetWin.bounds;
     overlay.backgroundColor = [UIColor colorWithWhite:0 alpha:0.45];
     overlay.tag = 9991;
+    overlay.layer.zPosition = 9998;
     [overlay addTarget:self action:@selector(dismissMenu) forControlEvents:UIControlEventTouchUpInside];
-    [self.window addSubview:overlay];
+    [targetWin addSubview:overlay];
+    [targetWin bringSubviewToFront:overlay];
     overlay.alpha = 0;
     [UIView animateWithDuration:0.3 animations:^{ overlay.alpha = 1; }];
     
@@ -251,6 +301,7 @@ static UIColor *MCColorForFeature(MCTFeature f) {
     panel.backgroundColor = [UIColor clearColor];
     panel.layer.cornerRadius = 22;
     panel.clipsToBounds = YES;
+    panel.layer.zPosition = 9999;
     
     // 毛玻璃
     UIVisualEffectView *blur = [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleDark]];
@@ -283,7 +334,7 @@ static UIColor *MCColorForFeature(MCTFeature f) {
     sep.backgroundColor = [UIColor colorWithWhite:0.3 alpha:0.3];
     [panel addSubview:sep];
     
-    // 功能列表 - 使用UIScrollView + 手动布局，避免TableView的delegate问题
+    // 功能列表 - 使用UIScrollView + 手动布局
     UIScrollView *scroll = [[UIScrollView alloc] initWithFrame:CGRectMake(0, 55, pw, ph - 55)];
     scroll.showsVerticalScrollIndicator = NO;
     scroll.backgroundColor = [UIColor clearColor];
@@ -376,11 +427,13 @@ static UIColor *MCColorForFeature(MCTFeature f) {
     [panel addSubview:scroll];
     
     self.menuView = panel;
+    g_menuPanel = panel;
     
     // 入场动画
     panel.transform = CGAffineTransformMakeScale(0.85, 0.85);
     panel.alpha = 0;
-    [self.window addSubview:panel];
+    [targetWin addSubview:panel];
+    [targetWin bringSubviewToFront:panel];
     [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.75 initialSpringVelocity:0.5 options:UIViewAnimationOptionCurveEaseOut animations:^{
         panel.transform = CGAffineTransformIdentity;
         panel.alpha = 1;
@@ -398,16 +451,18 @@ static UIColor *MCColorForFeature(MCTFeature f) {
 - (void)dismissMenu {
     if (!self.menuVisible) return;
     self.menuVisible = NO;
+    g_menuVisible = NO;
     
     [UIView animateWithDuration:0.25 animations:^{
         self.menuView.transform = CGAffineTransformMakeScale(0.85, 0.85);
         self.menuView.alpha = 0;
-        UIView *ov = [self.window viewWithTag:9991];
+        UIView *ov = [g_targetWindow viewWithTag:9991];
         ov.alpha = 0;
     } completion:^(BOOL finished) {
         [self.menuView removeFromSuperview];
         self.menuView = nil;
-        [[self.window viewWithTag:9991] removeFromSuperview];
+        g_menuPanel = nil;
+        [[g_targetWindow viewWithTag:9991] removeFromSuperview];
     }];
 }
 
@@ -475,7 +530,7 @@ static UIColor *MCColorForFeature(MCTFeature f) {
             }
         }];
         
-        // 方式3: 极限后备 - 5秒后强制加载
+        // 方式3: 极限后备 - 8秒后强制加载
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             if (!g_tweakReady) {
                 g_tweakReady = YES;
@@ -490,7 +545,6 @@ static UIColor *MCColorForFeature(MCTFeature f) {
                                                            queue:[NSOperationQueue mainQueue]
                                                       usingBlock:^(NSNotification *note) {
             if (!g_tweakReady) {
-                // 延迟2秒确保UI准备就绪
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                     if (!g_tweakReady) {
                         g_tweakReady = YES;
@@ -504,9 +558,6 @@ static UIColor *MCColorForFeature(MCTFeature f) {
 }
 
 #pragma mark - ==================== 游戏功能钩子 ====================
-
-// 尝试钩取 Minecraft 游戏类
-// 注意: 实际类名可能因版本而异，使用 @try 保护防止崩溃
 
 %hook LocalPlayer
 
@@ -574,13 +625,14 @@ static UIColor *MCColorForFeature(MCTFeature f) {
     %orig;
     @autoreleasepool {
         @try {
+            id me = (id)self;
             // 持续性功能在每tick执行
             id player = nil;
             SEL localPlayerSel = NSSelectorFromString(@"localPlayer");
-            if ([self respondsToSelector:localPlayerSel]) {
+            if ([me respondsToSelector:localPlayerSel]) {
                 #pragma clang diagnostic push
                 #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                player = [self performSelector:localPlayerSel];
+                player = [me performSelector:localPlayerSel];
                 #pragma clang diagnostic pop
             }
             if (!player) return;
