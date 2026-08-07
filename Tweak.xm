@@ -507,16 +507,16 @@ static UIColor *MCColorForFeature(MCTFeature feature) {
         @"自由飞行模式",
         @"提升移动速度",
         @"自动攻击附近敌人",
-        "透视实体位置",
-        "透视矿物方块",
-        "免疫摔落伤害",
-        "快速破坏方块",
-        "自动补充饱食度",
-        "增加交互距离",
-        "免疫击退效果",
-        "永久明亮视野",
-        "自动切换最佳工具",
-        "穿越方块移动"
+        @"透视实体位置",
+        @"透视矿物方块",
+        @"免疫摔落伤害",
+        @"快速破坏方块",
+        @"自动补充饱食度",
+        @"增加交互距离",
+        @"免疫击退效果",
+        @"永久明亮视野",
+        @"自动切换最佳工具",
+        @"穿越方块移动"
     ];
     descLabel.text = (feature < descs.count) ? descs[feature] : @"";
     
@@ -841,7 +841,7 @@ static BOOL g_hasInitializedOriginals = NO;
                     if ([g_localPlayer respondsToSelector:hungerSel]) {
                         #pragma clang diagnostic push
                         #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                        float hunger = (float)[g_localPlayer performSelector:hungerSel];
+                        float hunger = [[g_localPlayer performSelector:hungerSel] floatValue];
                         #pragma clang diagnostic pop
                         if (hunger < 18.0f) {
                             SEL eatSel = NSSelectorFromString(@"eatBestFood");
