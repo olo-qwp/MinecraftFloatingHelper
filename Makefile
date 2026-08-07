@@ -17,7 +17,7 @@ $(TWEAK_NAME)_FILES = Tweak.xm
 $(TWEAK_NAME)_FRAMEWORKS = UIKit Foundation CoreGraphics QuartzCore
 
 # 启用ARC，忽略不必要的警告
-$(TWEAK_NAME)_CFLAGS = -fobjc-arc -Wno-c99-designator -Wno-unused-variable
+$(TWEAK_NAME)_CFLAGS = -fobjc-arc -Wno-c99-designator -Wno-unused-variable -Wno-deprecated-declarations
 
 # 引入tweak构建规则
 include $(THEOS_MAKE_PATH)/tweak.mk

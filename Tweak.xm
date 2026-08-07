@@ -98,33 +98,49 @@ static UIColor *MCColorForFeature(MCTFeature f) {
     }
 }
 
-/// 获取当前App最上层的窗口，用于添加悬浮窗
+/// 获取当前App最上层的可见窗口，用于添加悬浮窗
+/// 兼容iOS 13+ (不再使用已弃用的UIWindowLevelNormal/.windows/.keyWindow)
 static UIWindow *MCGetTargetWindow(void) {
-    if (g_targetWindow && !g_targetWindow.hidden) {
+    if (g_targetWindow && !g_targetWindow.hidden && g_targetWindow.superview) {
         return g_targetWindow;
     }
+    g_targetWindow = nil;
     
-    // 尝试获取keyWindow
-    UIWindow *keyWin = [UIApplication sharedApplication].keyWindow;
-    if (keyWin && !keyWin.hidden) {
-        g_targetWindow = keyWin;
-        return keyWin;
+    // 方式1: 通过connectedScenes获取 (iOS 13+ 推荐方式)
+    if (@available(iOS 13.0, *)) {
+        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+            UIWindowScene *ws = (UIWindowScene *)scene;
+            if (ws.activationState != UISceneActivationStateForegroundActive) continue;
+            // 取该scene中最上层的可见窗口
+            UIWindow *topWin = nil;
+            for (UIWindow *win in ws.windows) {
+                if (!win.hidden && win.windowLevel >= 0.0) {
+                    if (!topWin || win.windowLevel > topWin.windowLevel) {
+                        topWin = win;
+                    }
+                }
+            }
+            if (topWin) {
+                g_targetWindow = topWin;
+                return topWin;
+            }
+        }
     }
     
-    // 后备：遍历所有窗口，取最上层可见窗口
-    NSArray *windows = [UIApplication sharedApplication].windows;
-    for (UIWindow *win in [windows reverseObjectEnumerator]) {
-        if (!win.hidden && win.windowLevel >= UIWindowLevelNormal) {
-            // 跳过我们自己的窗口（如果有）
+    // 方式2: 遍历所有窗口 (后备)
+    for (UIWindow *win in [[UIApplication sharedApplication] windows]) {
+        if (!win.hidden && win.windowLevel >= 0.0) {
             g_targetWindow = win;
             return win;
         }
     }
     
-    // 最后尝试
-    if (windows.count > 0) {
-        g_targetWindow = windows[0];
-        return windows[0];
+    // 方式3: 取第一个窗口
+    NSArray *allWins = [[UIApplication sharedApplication] windows];
+    if (allWins.count > 0) {
+        g_targetWindow = allWins[0];
+        return allWins[0];
     }
     
     return nil;
@@ -153,17 +169,24 @@ static UIWindow *MCGetTargetWindow(void) {
 }
 
 - (void)setup {
-    if (self.floatingBtn) return;
-    
     UIWindow *targetWin = MCGetTargetWindow();
     if (!targetWin) {
         NSLog(@"[MCTweak] 无法获取目标窗口，延迟重试");
-        // 延迟重试
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             [self setup];
         });
         return;
     }
+    
+    // 如果按钮已存在且在正确窗口中，跳过
+    if (self.floatingBtn && self.floatingBtn.superview == targetWin) {
+        return;
+    }
+    
+    // 清理旧按钮
+    [self.floatingBtn removeFromSuperview];
+    self.floatingBtn = nil;
+    g_floatingBtn = nil;
     
     CGFloat sw = [UIScreen mainScreen].bounds.size.width;
     CGFloat sh = [UIScreen mainScreen].bounds.size.height;
@@ -193,12 +216,28 @@ static UIWindow *MCGetTargetWindow(void) {
     [btn addGestureRecognizer:pan];
     
     [targetWin addSubview:btn];
+    [targetWin bringSubviewToFront:btn];
     
     self.floatingBtn = btn;
     g_floatingBtn = btn;
     g_targetWindow = targetWin;
     
+    // 监听窗口变化，自动重新附加
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(windowDidChange:)
+                                                 name:UIWindowDidBecomeVisibleNotification
+                                               object:nil];
+    
     NSLog(@"[MCTweak] 悬浮按钮已添加到目标窗口 %@", targetWin);
+}
+
+- (void)windowDidChange:(NSNotification *)note {
+    // 如果按钮还在但不在正确的窗口，重新设置
+    if (self.floatingBtn && self.floatingBtn.superview != g_targetWindow) {
+        MCExecOnMain(^{
+            [self setup];
+        });
+    }
 }
 
 - (void)show {
@@ -206,9 +245,15 @@ static UIWindow *MCGetTargetWindow(void) {
         [self setup];
         if (!self.floatingBtn) return;
         
-        // 确保按钮可见
+        // 确保按钮在最上层
         self.floatingBtn.hidden = NO;
-        [self.floatingBtn.superview bringSubviewToFront:self.floatingBtn];
+        UIWindow *win = MCGetTargetWindow();
+        if (win) {
+            [win addSubview:self.floatingBtn];
+            [win bringSubviewToFront:self.floatingBtn];
+        } else {
+            [self.floatingBtn.superview bringSubviewToFront:self.floatingBtn];
+        }
         
         // 入场动画
         self.floatingBtn.transform = CGAffineTransformMakeScale(0.3, 0.3);
@@ -492,10 +537,10 @@ static UIWindow *MCGetTargetWindow(void) {
 
 /*
  * 初始化策略：
- * 1. %ctor 在 dylib 加载时立即执行
- * 2. 使用 dispatch_after 延迟等待 App 就绪
- * 3. 使用 UIApplicationDidBecomeActiveNotification 作为后备
- * 4. 多重检查确保只执行一次
+ * 1. 监听 UIApplicationDidFinishLaunchingNotification 等待App启动完成
+ * 2. 启动后每隔1秒尝试获取窗口，最多尝试10次
+ * 3. 监听 UIApplicationDidBecomeActiveNotification 作为后备
+ * 4. 窗口出现时自动重新附加按钮
  */
 
 %ctor {
@@ -509,49 +554,62 @@ static UIWindow *MCGetTargetWindow(void) {
             return;
         }
         
-        // 方式1: 延迟加载 - 给App初始化时间
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            if (!g_tweakReady) {
-                g_tweakReady = YES;
-                [[MCFloatingManager shared] show];
-                NSLog(@"[MCTweak] 方式1: 延迟加载成功");
-            }
-        });
+        // 方式1: 启动完成后延时加载
+        [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidFinishLaunchingNotification
+                                                          object:nil
+                                                           queue:[NSOperationQueue mainQueue]
+                                                      usingBlock:^(NSNotification *note) {
+            // 启动后等待2秒，给游戏初始化时间
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                if (!g_tweakReady) {
+                    g_tweakReady = YES;
+                    [[MCFloatingManager shared] show];
+                    NSLog(@"[MCTweak] 方式1: 启动完成加载");
+                }
+            });
+        }];
         
-        // 方式2: 后备 - 监听App活跃通知
+        // 方式2: 后备 - App活跃时加载
         [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification
                                                           object:nil
                                                            queue:[NSOperationQueue mainQueue]
                                                       usingBlock:^(NSNotification *note) {
             if (!g_tweakReady) {
-                g_tweakReady = YES;
-                [[MCFloatingManager shared] show];
-                NSLog(@"[MCTweak] 方式2: 通知加载成功");
-            }
-        }];
-        
-        // 方式3: 极限后备 - 8秒后强制加载
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            if (!g_tweakReady) {
-                g_tweakReady = YES;
-                [[MCFloatingManager shared] show];
-                NSLog(@"[MCTweak] 方式3: 强制加载成功");
-            }
-        });
-        
-        // 方式4: 监听UIApplicationDidFinishLaunchingNotification
-        [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidFinishLaunchingNotification
-                                                          object:nil
-                                                           queue:[NSOperationQueue mainQueue]
-                                                      usingBlock:^(NSNotification *note) {
-            if (!g_tweakReady) {
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                     if (!g_tweakReady) {
                         g_tweakReady = YES;
                         [[MCFloatingManager shared] show];
-                        NSLog(@"[MCTweak] 方式4: launch通知加载成功");
+                        NSLog(@"[MCTweak] 方式2: 活跃通知加载");
                     }
                 });
+            }
+        }];
+        
+        // 方式3: 延时加载 - 给App充足初始化时间
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (!g_tweakReady) {
+                g_tweakReady = YES;
+                [[MCFloatingManager shared] show];
+                NSLog(@"[MCTweak] 方式3: 延时加载");
+            }
+        });
+        
+        // 方式4: 窗口出现时尝试加载
+        [[NSNotificationCenter defaultCenter] addObserverForName:UIWindowDidBecomeVisibleNotification
+                                                          object:nil
+                                                           queue:[NSOperationQueue mainQueue]
+                                                      usingBlock:^(NSNotification *note) {
+            if (!g_tweakReady && [note.object isKindOfClass:[UIWindow class]]) {
+                UIWindow *win = (UIWindow *)note.object;
+                if (win.windowLevel >= 0.0 && !win.hidden) {
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                        if (!g_tweakReady) {
+                            g_tweakReady = YES;
+                            [[MCFloatingManager shared] show];
+                            NSLog(@"[MCTweak] 方式4: 窗口出现加载");
+                        }
+                    });
+                }
             }
         }];
     }
