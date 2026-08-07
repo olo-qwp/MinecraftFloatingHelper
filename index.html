@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MinecraftFloatingHelper - iOS悬浮窗辅助工具</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', sans-serif;
+    background: linear-gradient(135deg, #0a0a0f 0%, #10101a 40%, #0d1117 100%);
+    color: #e6e6e6;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+  .bg-grid {
+    position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    background-image: 
+      linear-gradient(rgba(32, 200, 150, 0.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(32, 200, 150, 0.03) 1px, transparent 1px);
+    background-size: 60px 60px;
+    pointer-events: none; z-index: 0;
+  }
+  .bg-glow {
+    position: fixed; top: -200px; left: 50%; transform: translateX(-50%);
+    width: 600px; height: 600px;
+    background: radial-gradient(circle, rgba(32,200,150,0.12) 0%, transparent 70%);
+    pointer-events: none; z-index: 0;
+  }
+  .container {
+    position: relative; z-index: 1;
+    max-width: 720px; margin: 0 auto; padding: 40px 20px 60px;
+  }
+  .header {
+    text-align: center; padding: 50px 0 30px;
+  }
+  .logo {
+    font-size: 56px; margin-bottom: 12px;
+    animation: float 3s ease-in-out infinite;
+  }
+  @keyframes float {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-10px); }
+  }
+  .title {
+    font-size: 28px; font-weight: 800;
+    background: linear-gradient(135deg, #20c896, #5eeac4);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+  .subtitle {
+    font-size: 14px; color: #888; margin-top: 8px;
+  }
+  .badge-row {
+    display: flex; justify-content: center; gap: 10px; margin-top: 16px; flex-wrap: wrap;
+  }
+  .badge {
+    padding: 5px 14px; border-radius: 20px; font-size: 12px; font-weight: 600;
+  }
+  .badge-green { background: rgba(32,200,150,0.15); color: #20c896; border: 1px solid rgba(32,200,150,0.25); }
+  .badge-blue { background: rgba(80,160,255,0.15); color: #50a0ff; border: 1px solid rgba(80,160,255,0.25); }
+  .badge-purple { background: rgba(180,130,255,0.15); color: #b482ff; border: 1px solid rgba(180,130,255,0.25); }
+
+  .card {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 20px; padding: 28px; margin-bottom: 20px;
+    backdrop-filter: blur(20px);
+  }
+  .card-title {
+    font-size: 18px; font-weight: 700; margin-bottom: 18px;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .dl-btn {
+    display: block; width: 100%; padding: 18px;
+    background: linear-gradient(135deg, #20c896, #1a9e78);
+    border: none; border-radius: 16px;
+    color: #fff; font-size: 17px; font-weight: 700; cursor: pointer;
+    text-decoration: none; text-align: center;
+    transition: all 0.25s;
+    box-shadow: 0 8px 32px rgba(32,200,150,0.25);
+  }
+  .dl-btn:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 12px 40px rgba(32,200,150,0.35);
+  }
+  .dl-info {
+    text-align: center; color: #777; font-size: 12px; margin-top: 10px;
+  }
+  .features {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 10px;
+  }
+  .feat-item {
+    display: flex; align-items: center; gap: 10px;
+    padding: 12px 16px;
+    background: rgba(255,255,255,0.03);
+    border-radius: 12px; font-size: 14px;
+    transition: background 0.2s;
+  }
+  .feat-item:hover { background: rgba(255,255,255,0.06); }
+  .feat-icon { font-size: 20px; width: 32px; text-align: center; }
+  .feat-name { font-weight: 600; }
+  .feat-val { color: #20c896; font-size: 12px; margin-left: auto; }
+
+  .steps { list-style: none; }
+  .steps li {
+    padding: 12px 0; border-bottom: 1px solid rgba(255,255,255,0.05);
+    display: flex; align-items: center; gap: 14px; font-size: 14px;
+  }
+  .step-num {
+    width: 28px; height: 28px; border-radius: 50%;
+    background: rgba(32,200,150,0.15); color: #20c896;
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 13px; flex-shrink: 0;
+  }
+  .step-note { color: #777; font-size: 12px; }
+  code {
+    background: rgba(255,255,255,0.08); padding: 2px 8px;
+    border-radius: 6px; font-size: 13px; color: #20c896;
+  }
+  .footer {
+    text-align: center; color: #555; font-size: 12px; padding: 30px 0;
+  }
+  .footer a { color: #20c896; text-decoration: none; }
+  .version-tag {
+    display: inline-block; background: rgba(32,200,150,0.12); color: #20c896;
+    padding: 3px 10px; border-radius: 8px; font-size: 13px; font-weight: 600;
+  }
+</style>
+</head>
+<body>
+<div class="bg-grid"></div>
+<div class="bg-glow"></div>
+
+<div class="container">
+  <div class="header">
+    <div class="logo">⛏️</div>
+    <div class="title">MinecraftFloatingHelper</div>
+    <div class="subtitle">iOS Minecraft PE 悬浮窗多功能辅助工具</div>
+    <div class="badge-row">
+      <span class="badge badge-green">Dopamine</span>
+      <span class="badge badge-blue">iOS 15+</span>
+      <span class="badge badge-purple">A11 · 60fps</span>
+      <span class="version-tag">v1.0.2</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">📥 下载安装</div>
+    <a class="dl-btn" href="com.mctweak.floatinghelper_1.0.2_iphoneos-arm64.deb" download>
+      ⬇ 下载 .deb 插件 (21 KB)
+    </a>
+    <div class="dl-info">
+      com.mctweak.floatinghelper_1.0.2_iphoneos-arm64.deb<br>
+      兼容 ElleKit 加载器 · Dopamine rootless
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">✨ 13项功能</div>
+    <div class="features">
+      <div class="feat-item"><span class="feat-icon">🪽</span><span class="feat-name">飞行 Fly</span><span class="feat-val">自由飞行</span></div>
+      <div class="feat-item"><span class="feat-icon">⚡</span><span class="feat-name">加速 Speed</span><span class="feat-val">3.5x</span></div>
+      <div class="feat-item"><span class="feat-icon">⚔️</span><span class="feat-name">杀戮光环</span><span class="feat-val">自动攻击</span></div>
+      <div class="feat-item"><span class="feat-icon">👁️</span><span class="feat-name">ESP透视</span><span class="feat-val">实体透视</span></div>
+      <div class="feat-item"><span class="feat-icon">💎</span><span class="feat-name">矿透X-Ray</span><span class="feat-val">矿物透视</span></div>
+      <div class="feat-item"><span class="feat-icon">🛡️</span><span class="feat-name">防摔 NoFall</span><span class="feat-val">免疫摔伤</span></div>
+      <div class="feat-item"><span class="feat-icon">⛏️</span><span class="feat-name">自动挖矿</span><span class="feat-val">快速破坏</span></div>
+      <div class="feat-item"><span class="feat-icon">🍖</span><span class="feat-name">自动吃</span><span class="feat-val">自动补食</span></div>
+      <div class="feat-item"><span class="feat-icon">📏</span><span class="feat-name">范围扩大</span><span class="feat-val">6格</span></div>
+      <div class="feat-item"><span class="feat-icon">🧱</span><span class="feat-name">防击退</span><span class="feat-val">免疫击退</span></div>
+      <div class="feat-item"><span class="feat-icon">☀️</span><span class="feat-name">夜视</span><span class="feat-val">永久明亮</span></div>
+      <div class="feat-item"><span class="feat-icon">🔧</span><span class="feat-name">自动工具</span><span class="feat-val">自动切换</span></div>
+      <div class="feat-item"><span class="feat-icon">👻</span><span class="feat-name">穿墙</span><span class="feat-val">穿越方块</span></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">📋 安装步骤</div>
+    <ul class="steps">
+      <li><span class="step-num">1</span><span>下载上方 <code>.deb</code> 文件</span></li>
+      <li><span class="step-num">2</span><span>通过 <strong>Sileo / Zebra</strong> 安装，或 <strong>iGameGods</strong> 导入</span></li>
+      <li><span class="step-num">3</span><span>打开 Minecraft PE，等待悬浮按钮出现</span></li>
+      <li><span class="step-num">4</span><span>点击悬浮按钮，选择功能开关即可使用</span></li>
+    </ul>
+    <div style="margin-top:14px;color:#888;font-size:12px;">
+      💡 提示：如果悬浮按钮未显示，请确认 ElleKit 已正常加载，或尝试重启游戏。
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">🔗 相关链接</div>
+    <div style="display:flex;flex-direction:column;gap:12px;">
+      <a href="https://github.com/olo-qwp/MinecraftFloatingHelper" style="color:#20c896;text-decoration:none;font-size:14px;">
+        📦 GitHub 仓库
+      </a>
+      <a href="https://github.com/olo-qwp/MinecraftFloatingHelper/releases" style="color:#20c896;text-decoration:none;font-size:14px;">
+        🏷️ GitHub Releases
+      </a>
+    </div>
+  </div>
+
+  <div class="footer">
+    MinecraftFloatingHelper v1.0.2 · Dopamine rootless · 
+    <a href="https://github.com/olo-qwp/MinecraftFloatingHelper">GitHub</a>
+  </div>
+</div>
+</body>
+</html>
