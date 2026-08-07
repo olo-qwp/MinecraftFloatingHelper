@@ -1,0 +1,10 @@
+Package: com.mctweak.floatinghelper
+Name: MinecraftFloatingHelper
+Version: 1.0.0
+Architecture: iphoneos-arm
+Description: 我的世界iOS悬浮窗多功能辅助工具 - 13项功能一键开启
+Maintainer: MCTweak Dev
+Author: MCTweak Dev
+Section: Tweaks
+Depends: mobilesubstrate (>= 0.9.5000), firmware (>= 13.0)
+Priority: optional

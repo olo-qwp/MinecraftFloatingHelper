@@ -1,0 +1,143 @@
+name: Build Minecraft Floating Helper Tweak
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:  # 允许手动触发
+
+jobs:
+  build:
+    runs-on: macos-latest
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+      with:
+        path: MinecraftTweak
+
+    - name: Cache Theos
+      id: cache-theos
+      uses: actions/cache@v4
+      with:
+        path: theos
+        key: ${{ runner.os }}-theos-${{ hashFiles('MinecraftTweak/Makefile') }}
+
+    - name: Install Dependencies
+      run: |
+        brew install make xz ldid dpkg coreutils
+
+    - name: Checkout Theos
+      if: steps.cache-theos.outputs.cache-hit != 'true'
+      uses: actions/checkout@v4
+      with:
+        repository: theos/theos
+        ref: master
+        submodules: recursive
+        path: theos
+
+    - name: Checkout Theos SDKs
+      uses: actions/checkout@v4
+      with:
+        repository: theos/sdks
+        path: theos/sdks
+        sparse-checkout: |
+          iPhoneOS14.5.sdk
+          iPhoneOS15.0.sdk
+          iPhoneOS16.0.sdk
+
+    - name: Setup Environment
+      run: |
+        echo "THEOS=$GITHUB_WORKSPACE/theos" >> $GITHUB_ENV
+        echo "$GITHUB_WORKSPACE/theos/bin" >> $GITHUB_PATH
+
+    - name: Build Rootful Package (arm64 arm64e)
+      run: |
+        cd MinecraftTweak
+        export THEOS=$GITHUB_WORKSPACE/theos
+        gmake clean package FINALPACKAGE=1 \
+          THEOS_PACKAGE_SCHEME=rootful \
+          ARCHS="arm64 arm64e" \
+          TARGET="iphone:clang:latest:13.0"
+        echo "✅ Rootful 编译完成"
+
+    - name: Build Rootless Package (arm64 arm64e)
+      run: |
+        cd MinecraftTweak
+        export THEOS=$GITHUB_WORKSPACE/theos
+        gmake clean package FINALPACKAGE=1 \
+          THEOS_PACKAGE_SCHEME=rootless \
+          ARCHS="arm64 arm64e" \
+          TARGET="iphone:clang:latest:15.0"
+        echo "✅ Rootless 编译完成"
+
+    - name: List Built Packages
+      run: |
+        echo "📦 编译产物:"
+        find MinecraftTweak -name "*.deb" -type f
+        echo "---"
+        ls -la MinecraftTweak/packages/ 2>/dev/null || echo "packages/ 目录不存在"
+
+    - name: Upload DEB Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: MinecraftFloatingHelper-DEB
+        path: |
+          MinecraftTweak/packages/*.deb
+        if-no-files-found: warn
+        retention-days: 30
+
+  # 发布到GitHub Release
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    
+    steps:
+    - name: Download Artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: MinecraftFloatingHelper-DEB
+        path: ./packages
+
+    - name: List Packages
+      run: ls -la ./packages/
+
+    - name: Create Release
+      id: create_release
+      uses: softprops/action-gh-release@v2
+      with:
+        name: "MinecraftFloatingHelper v1.0.0"
+        tag_name: "v1.0.0"
+        body: |
+          # Minecraft Floating Helper v1.0.0
+
+          🎮 iOS Minecraft PE 悬浮窗多功能辅助工具
+
+          ## ✨ 13项功能
+          - 🪶 **飞行** - 自由飞行模式
+          - ⚡ **加速** - 3.5倍移动速度
+          - ⚔️ **杀戮光环** - 自动攻击附近敌人
+          - 👁️ **ESP透视** - 透视实体位置
+          - 💎 **矿透X-Ray** - 透视矿物方块
+          - 🛡️ **防摔** - 免疫摔落伤害
+          - ⛏️ **自动挖矿** - 快速破坏方块
+          - 🍖 **自动吃** - 自动补充饱食度
+          - 📏 **范围扩大** - 增加交互距离
+          - 🧱 **防击退** - 免疫击退效果
+          - ☀️ **夜视** - 永久明亮视野
+          - 🔧 **自动工具** - 自动切换最佳工具
+          - 👻 **穿墙** - 穿越方块移动
+
+          ## 📦 包含
+          - `*_iphoneos-arm.deb` - Rootful模式 (传统越狱)
+          - `*_iphoneos-arm64e.deb` - Rootless模式 (iOS 15+)
+
+          ## ⚙️ 兼容性
+          - A11芯片 (iPhone 8/X) 60fps流畅运行
+          - iOS 13+
+          - 支持iGameGod导入
+        files: |
+          ./packages/*.deb
+        draft: false
+        prerelease: false
+        generate_release_notes: false
