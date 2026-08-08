@@ -825,8 +825,10 @@ static UIResponder *MCGetCurrentResponder(void) {
         }
     }
     if (!kw) return nil;
+    // sendAction:to:nil 走响应者链，最终由第一响应者接收（API 属于 UIApplication）
     @try {
-        [kw sendAction:@selector(mc_captureFirstResponder:) to:nil from:nil forEvent:nil];
+        [[UIApplication sharedApplication] sendAction:@selector(mc_captureFirstResponder:)
+                                                    to:nil from:nil forEvent:nil];
     } @catch (NSException *e) {}
     return g_mcCurrentResponder;
 }
