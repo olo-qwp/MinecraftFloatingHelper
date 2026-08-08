@@ -1,11 +1,14 @@
 /*
  * MinecraftFloatingHelper - iOS悬浮窗多功能辅助工具 for Minecraft PE
- * 专注Dopamine (rootless) 版本
+ * 支持所有MC版本: 国际版/网易版/预览版/教育版
  * 兼容A11芯片 (iPhone 8/X), iOS 15+, 60fps
  * 13项功能: 飞行/加速/杀戮光环/ESP透视/X-Ray/防摔/自动挖矿/自动吃/范围扩大/防击退/夜视/自动工具/穿墙
  *
- * 关键方案: 直接添加到keyWindow，不创建独立UIWindow
- * 这是最可靠的悬浮窗显示方式，避免UIWindow场景兼容性问题
+ * 关键方案: 创建独立 PassThroughWindow (UIWindowLevelStatusBar + 1000)
+ * Minecraft PE 使用 Metal 渲染层覆盖整个窗口，直接 addSubview 到游戏窗口
+ * 会被渲染层遮挡。必须使用独立高层 UIWindow 才能显示在游戏画面之上。
+ * PassThroughWindow 重写 hitTest:with: 实现触摸穿透，不影响游戏交互。
+ * 使用 CADisplayLink 持续保活窗口，防止被游戏渲染覆盖。
  */
 
 #import <UIKit/UIKit.h>
@@ -71,7 +74,29 @@ static BOOL g_tweakReady = NO;
 static UIButton *g_floatingBtn = nil;
 static UIView *g_menuPanel = nil;
 static BOOL g_menuVisible = NO;
-static UIWindow *g_targetWindow = nil;  // 目标窗口，找到后缓存
+
+#pragma mark - ==================== PassThroughWindow ====================
+
+// 独立窗口，悬浮在游戏画面之上
+// hitTest 返回 nil 时触摸穿透到游戏，只有点中按钮/菜单时才拦截
+@interface MCPassThroughWindow : UIWindow
+@end
+
+@implementation MCPassThroughWindow
+
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *hitView = [super hitTest:point withEvent:event];
+    // 只有命中的是窗口本身（透明背景），才返回 nil 让触摸穿透到游戏
+    if (hitView == self) {
+        return nil;
+    }
+    return hitView;
+}
+
+@end
+
+static MCPassThroughWindow *g_overlayWindow = nil;
+static CADisplayLink *g_keepAliveLink = nil;
 
 #pragma mark - ==================== 颜色定义 ====================
 
@@ -98,52 +123,84 @@ static UIColor *MCColorForFeature(MCTFeature f) {
     }
 }
 
-/// 获取当前App最上层的可见窗口，用于添加悬浮窗
-/// 兼容iOS 13+ (不再使用已弃用的UIWindowLevelNormal/.windows/.keyWindow)
-static UIWindow *MCGetTargetWindow(void) {
-    if (g_targetWindow && !g_targetWindow.hidden && g_targetWindow.superview) {
-        return g_targetWindow;
-    }
-    g_targetWindow = nil;
-    
-    // 方式1: 通过connectedScenes获取 (iOS 13+ 推荐方式)
+/// 获取当前 App 的活跃 UIWindowScene
+static UIWindowScene *MCGetActiveScene(void) {
     if (@available(iOS 13.0, *)) {
         for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
             if (![scene isKindOfClass:[UIWindowScene class]]) continue;
             UIWindowScene *ws = (UIWindowScene *)scene;
-            if (ws.activationState != UISceneActivationStateForegroundActive) continue;
-            // 取该scene中最上层的可见窗口
-            UIWindow *topWin = nil;
-            for (UIWindow *win in ws.windows) {
-                if (!win.hidden && win.windowLevel >= 0.0) {
-                    if (!topWin || win.windowLevel > topWin.windowLevel) {
-                        topWin = win;
-                    }
-                }
+            if (ws.activationState == UISceneActivationStateForegroundActive) {
+                return ws;
             }
-            if (topWin) {
-                g_targetWindow = topWin;
-                return topWin;
+        }
+        // 后备: 取任意一个 windowScene
+        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+            if ([scene isKindOfClass:[UIWindowScene class]]) {
+                return (UIWindowScene *)scene;
             }
         }
     }
-    
-    // 方式2: 遍历所有窗口 (后备)
-    for (UIWindow *win in [[UIApplication sharedApplication] windows]) {
-        if (!win.hidden && win.windowLevel >= 0.0) {
-            g_targetWindow = win;
-            return win;
-        }
-    }
-    
-    // 方式3: 取第一个窗口
-    NSArray *allWins = [[UIApplication sharedApplication] windows];
-    if (allWins.count > 0) {
-        g_targetWindow = allWins[0];
-        return allWins[0];
-    }
-    
     return nil;
+}
+
+/// CADisplayLink 保活辅助类
+@interface MCKeepAlive : NSObject
++ (instancetype)shared;
+- (void)tick:(CADisplayLink *)link;
+@end
+
+@implementation MCKeepAlive
++ (instancetype)shared {
+    static MCKeepAlive *instance = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ instance = [self new]; });
+    return instance;
+}
+- (void)tick:(CADisplayLink *)link {
+    if (g_overlayWindow) {
+        // 仅保持窗口可见，不抢占 key window（避免破坏游戏输入/窗口管理）
+        if (g_overlayWindow.hidden) {
+            g_overlayWindow.hidden = NO;
+        }
+        // 把悬浮按钮提到最前，防止被游戏渲染层覆盖
+        if (g_floatingBtn && g_floatingBtn.superview == g_overlayWindow) {
+            [g_overlayWindow bringSubviewToFront:g_floatingBtn];
+        }
+    }
+}
+@end
+
+/// 创建或复用独立 overlay 窗口
+static MCPassThroughWindow *MCGetOverlayWindow(void) {
+    if (g_overlayWindow && !g_overlayWindow.hidden) {
+        return g_overlayWindow;
+    }
+
+    UIWindowScene *scene = MCGetActiveScene();
+    if (!scene) {
+        NSLog(@"[MCTweak] 无法获取 UIWindowScene");
+        return nil;
+    }
+
+    g_overlayWindow = [[MCPassThroughWindow alloc] initWithWindowScene:scene];
+    // 使用极高窗口层级，确保在 Metal 渲染层之上
+    g_overlayWindow.windowLevel = UIWindowLevelStatusBar + 1000.0;
+    g_overlayWindow.backgroundColor = [UIColor clearColor];
+    g_overlayWindow.opaque = NO;
+    g_overlayWindow.frame = [UIScreen mainScreen].bounds;
+    g_overlayWindow.userInteractionEnabled = YES;
+    // 仅设为可见，不抢占 key window（游戏保持焦点，hitTest 跨窗口穿透仍生效）
+    g_overlayWindow.hidden = NO;
+
+    // CADisplayLink 持续保活，防止游戏渲染覆盖窗口
+    if (!g_keepAliveLink) {
+        g_keepAliveLink = [CADisplayLink displayLinkWithTarget:[MCKeepAlive shared]
+                                                       selector:@selector(tick:)];
+        [g_keepAliveLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+    }
+
+    NSLog(@"[MCTweak] Overlay 窗口已创建, level: %.1f", g_overlayWindow.windowLevel);
+    return g_overlayWindow;
 }
 
 #pragma mark - ==================== 悬浮窗管理 ====================
@@ -169,29 +226,42 @@ static UIWindow *MCGetTargetWindow(void) {
 }
 
 - (void)setup {
-    UIWindow *targetWin = MCGetTargetWindow();
-    if (!targetWin) {
-        NSLog(@"[MCTweak] 无法获取目标窗口，延迟重试");
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            [self setup];
-        });
+    MCPassThroughWindow *overlayWin = MCGetOverlayWindow();
+
+    // 后备: 若无法创建独立 overlay 窗口，注入到游戏 key window 的根视图
+    UIView *hostView = nil;
+    if (overlayWin) {
+        hostView = overlayWin;
+    } else {
+        NSLog(@"[MCTweak] overlay 窗口不可用，尝试注入游戏 key window");
+        UIWindow *keyWin = nil;
+        for (UIWindow *w in [UIApplication sharedApplication].windows) {
+            if (!w.hidden && w.windowLevel == UIWindowLevelNormal) { keyWin = w; break; }
+        }
+        if (!keyWin) {
+            NSLog(@"[MCTweak] 无可用 key window，延迟重试");
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                [self setup];
+            });
+            return;
+        }
+        hostView = keyWin.rootViewController.view ?: keyWin;
+    }
+
+    // 如果按钮已存在且在当前宿主中，跳过
+    if (self.floatingBtn && self.floatingBtn.superview == hostView) {
         return;
     }
-    
-    // 如果按钮已存在且在正确窗口中，跳过
-    if (self.floatingBtn && self.floatingBtn.superview == targetWin) {
-        return;
-    }
-    
+
     // 清理旧按钮
     [self.floatingBtn removeFromSuperview];
     self.floatingBtn = nil;
     g_floatingBtn = nil;
-    
+
     CGFloat sw = [UIScreen mainScreen].bounds.size.width;
     CGFloat sh = [UIScreen mainScreen].bounds.size.height;
-    
-    // 悬浮按钮 - 直接添加到目标窗口
+
+    // 悬浮按钮 - 直接添加到宿主视图（不用 rootViewController）
     CGFloat btnSize = 52;
     CGFloat margin = 16;
     UIButton *btn = [UIButton buttonWithType:UIButtonTypeCustom];
@@ -207,54 +277,36 @@ static UIWindow *MCGetTargetWindow(void) {
     btn.titleLabel.font = [UIFont systemFontOfSize:24];
     [btn setTitle:@"⛏" forState:UIControlStateNormal];
     [btn addTarget:self action:@selector(btnTapped) forControlEvents:UIControlEventTouchUpInside];
-    
+
     // 确保按钮在最上层
     btn.layer.zPosition = 9999;
-    
+
     // 拖拽手势
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(btnDragged:)];
     [btn addGestureRecognizer:pan];
-    
-    [targetWin addSubview:btn];
-    [targetWin bringSubviewToFront:btn];
-    
+
+    // 直接添加到宿主视图，不通过 rootViewController
+    [hostView addSubview:btn];
+    [hostView bringSubviewToFront:btn];
+
     self.floatingBtn = btn;
     g_floatingBtn = btn;
-    g_targetWindow = targetWin;
-    
-    // 监听窗口变化，自动重新附加
-    [[NSNotificationCenter defaultCenter] addObserver:self
-                                             selector:@selector(windowDidChange:)
-                                                 name:UIWindowDidBecomeVisibleNotification
-                                               object:nil];
-    
-    NSLog(@"[MCTweak] 悬浮按钮已添加到目标窗口 %@", targetWin);
-}
 
-- (void)windowDidChange:(NSNotification *)note {
-    // 如果按钮还在但不在正确的窗口，重新设置
-    if (self.floatingBtn && self.floatingBtn.superview != g_targetWindow) {
-        MCExecOnMain(^{
-            [self setup];
-        });
-    }
+    NSLog(@"[MCTweak] 悬浮按钮已添加到宿主视图: %@", hostView.class);
 }
 
 - (void)show {
     MCExecOnMain(^{
         [self setup];
         if (!self.floatingBtn) return;
-        
-        // 确保按钮在最上层
+
+        // 确保按钮可见并位于最上层（宿主可能是 overlay 窗口或游戏 key window）
         self.floatingBtn.hidden = NO;
-        UIWindow *win = MCGetTargetWindow();
-        if (win) {
-            [win addSubview:self.floatingBtn];
-            [win bringSubviewToFront:self.floatingBtn];
-        } else {
-            [self.floatingBtn.superview bringSubviewToFront:self.floatingBtn];
+        UIView *host = self.floatingBtn.superview;
+        if (host) {
+            [host bringSubviewToFront:self.floatingBtn];
         }
-        
+
         // 入场动画
         self.floatingBtn.transform = CGAffineTransformMakeScale(0.3, 0.3);
         self.floatingBtn.alpha = 0;
@@ -262,7 +314,7 @@ static UIWindow *MCGetTargetWindow(void) {
             self.floatingBtn.transform = CGAffineTransformIdentity;
             self.floatingBtn.alpha = 1;
         } completion:nil];
-        
+
         NSLog(@"[MCTweak] 悬浮窗已显示");
     });
 }
@@ -277,6 +329,11 @@ static UIWindow *MCGetTargetWindow(void) {
         [self.floatingBtn removeFromSuperview];
         self.floatingBtn = nil;
         g_floatingBtn = nil;
+        // 隐藏 overlay 窗口（若存在）
+        if (g_overlayWindow) {
+            g_overlayWindow.hidden = YES;
+            g_overlayWindow = nil;
+        }
     });
 }
 
@@ -316,28 +373,31 @@ static UIWindow *MCGetTargetWindow(void) {
     if (self.menuVisible) return;
     self.menuVisible = YES;
     g_menuVisible = YES;
-    
-    // 获取目标窗口
-    UIWindow *targetWin = g_targetWindow;
-    if (!targetWin) targetWin = MCGetTargetWindow();
-    if (!targetWin) return;
-    
+
+    // 使用按钮所在宿主作为菜单容器（overlay 窗口或游戏 key window）
+    UIView *containerView = self.floatingBtn.superview;
+    if (!containerView) {
+        MCPassThroughWindow *overlayWin = MCGetOverlayWindow();
+        containerView = overlayWin;
+    }
+    if (!containerView) return;
+
     CGFloat sw = [UIScreen mainScreen].bounds.size.width;
     CGFloat sh = [UIScreen mainScreen].bounds.size.height;
     CGFloat pw = MIN(sw - 32, 380);
     CGFloat ph = MIN(sh * 0.72, 540);
     CGFloat px = (sw - pw) / 2;
     CGFloat py = (sh - ph) / 2;
-    
+
     // 遮罩层
     UIButton *overlay = [UIButton buttonWithType:UIButtonTypeCustom];
-    overlay.frame = targetWin.bounds;
+    overlay.frame = CGRectMake(0, 0, sw, sh);
     overlay.backgroundColor = [UIColor colorWithWhite:0 alpha:0.45];
     overlay.tag = 9991;
     overlay.layer.zPosition = 9998;
     [overlay addTarget:self action:@selector(dismissMenu) forControlEvents:UIControlEventTouchUpInside];
-    [targetWin addSubview:overlay];
-    [targetWin bringSubviewToFront:overlay];
+    [containerView addSubview:overlay];
+    [containerView bringSubviewToFront:overlay];
     overlay.alpha = 0;
     [UIView animateWithDuration:0.3 animations:^{ overlay.alpha = 1; }];
     
@@ -473,12 +533,12 @@ static UIWindow *MCGetTargetWindow(void) {
     
     self.menuView = panel;
     g_menuPanel = panel;
-    
+
     // 入场动画
     panel.transform = CGAffineTransformMakeScale(0.85, 0.85);
     panel.alpha = 0;
-    [targetWin addSubview:panel];
-    [targetWin bringSubviewToFront:panel];
+    [containerView addSubview:panel];
+    [containerView bringSubviewToFront:panel];
     [UIView animateWithDuration:0.4 delay:0 usingSpringWithDamping:0.75 initialSpringVelocity:0.5 options:UIViewAnimationOptionCurveEaseOut animations:^{
         panel.transform = CGAffineTransformIdentity;
         panel.alpha = 1;
@@ -497,17 +557,18 @@ static UIWindow *MCGetTargetWindow(void) {
     if (!self.menuVisible) return;
     self.menuVisible = NO;
     g_menuVisible = NO;
-    
+
+    UIView *container = self.menuView.superview ?: (UIView *)g_overlayWindow;
     [UIView animateWithDuration:0.25 animations:^{
         self.menuView.transform = CGAffineTransformMakeScale(0.85, 0.85);
         self.menuView.alpha = 0;
-        UIView *ov = [g_targetWindow viewWithTag:9991];
+        UIView *ov = [container viewWithTag:9991];
         ov.alpha = 0;
     } completion:^(BOOL finished) {
         [self.menuView removeFromSuperview];
         self.menuView = nil;
         g_menuPanel = nil;
-        [[g_targetWindow viewWithTag:9991] removeFromSuperview];
+        [[container viewWithTag:9991] removeFromSuperview];
     }];
 }
 
@@ -547,12 +608,22 @@ static UIWindow *MCGetTargetWindow(void) {
     @autoreleasepool {
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier] ?: @"";
         NSLog(@"[MCTweak] 插件加载! Bundle: %@", bundleID);
-        
-        // 检查是否在 Minecraft PE 中
-        if (![bundleID isEqualToString:@"com.mojang.minecraftpe"]) {
+
+        // 支持所有 MC 版本: 国际版/预览版/教育版/网易版
+        // plist 已限制仅注入 MC 相关 App，这里做容错校验，匹配所有 Mojang/网易 变体
+        BOOL isMinecraft = NO;
+        NSString *lower = [bundleID lowercaseString];
+        if ([lower hasPrefix:@"com.mojang.minecraft"]) {
+            isMinecraft = YES; // com.mojang.minecraftpe / .preview / minecraftedu / minecraftedu_preview
+        } else if ([lower isEqualToString:@"com.netease.x19"] ||
+                   [lower isEqualToString:@"com.netease.mc"]) {
+            isMinecraft = YES; // 网易中国版
+        }
+        if (!isMinecraft) {
             NSLog(@"[MCTweak] 非目标App，跳过加载");
             return;
         }
+        NSLog(@"[MCTweak] 已识别为 Minecraft 变体，开始初始化");
         
         // 方式1: 启动完成后延时加载
         [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidFinishLaunchingNotification

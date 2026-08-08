@@ -7,6 +7,11 @@
         <key>Bundles</key>
         <array>
             <string>com.mojang.minecraftpe</string>
+            <string>com.mojang.minecraftpe.preview</string>
+            <string>com.mojang.minecraftedu</string>
+            <string>com.mojang.minecraftedu_preview</string>
+            <string>com.netease.x19</string>
+            <string>com.netease.mc</string>
         </array>
     </dict>
 </dict>
