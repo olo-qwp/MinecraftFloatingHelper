@@ -23,10 +23,41 @@
 #pragma mark - ==================== Inline Hook 框架 (ellekit/Substrate API) ====================
 // 使用 Dopamine 的 ellekit 提供的 MSHookFunction 做真正的进程内 inline hook。
 // 不依赖游戏命令，直接在函数入口插入跳转，劫持游戏/系统函数行为。
-// 声明为 extern "C" 以匹配 Substrate ABI（ellekit 兼容）。
-extern "C" {
-    void MSHookFunction(void *symbol, void *replace, void **result);
-    void *MSFindSymbol(const char *name);  // ellekit/Substrate: 在主镜像按名查符号
+// 运行时由 ellekit 注入 dylib 提供，编译时不链接（用 dlsym 动态解析，避免
+// 编译机缺失 libellekit 导致链接失败）。
+typedef void (*MSHookFunction_t)(void *symbol, void *replace, void **result);
+typedef void *(*MSFindSymbol_t)(const char *name);
+
+static MSHookFunction_t g_MSHookFunction = NULL;
+static MSFindSymbol_t   g_MSFindSymbol   = NULL;
+
+/// 运行时解析 ellekit/Substrate 的 hook 函数指针（在 %ctor 调用）
+static BOOL MCResolveHookAPI(void) {
+    if (g_MSHookFunction && g_MSFindSymbol) return YES;
+    // ellekit 库路径（rootless）；rootful 是 /usr/lib/libsubstrate.dylib
+    const char *paths[] = {
+        "/var/jb/usr/lib/libellekit.dylib",
+        "/var/jb/usr/lib/TweakInject.dylib",
+        "/usr/lib/libsubstrate.dylib",
+        "/usr/lib/TweakInject.dylib",
+        NULL
+    };
+    void *handle = NULL;
+    for (int i = 0; paths[i] && !handle; i++) {
+        handle = dlopen(paths[i], RTLD_NOW | RTLD_NOLOAD); // 已加载则取 handle
+        if (!handle) handle = dlopen(paths[i], RTLD_NOW);
+    }
+    if (!handle) {
+        // 退化：在默认符号空间查（ellekit 符号可能已并入进程）
+        g_MSHookFunction = (MSHookFunction_t)dlsym(RTLD_DEFAULT, "MSHookFunction");
+        g_MSFindSymbol   = (MSFindSymbol_t)dlsym(RTLD_DEFAULT, "MSFindSymbol");
+    } else {
+        g_MSHookFunction = (MSHookFunction_t)dlsym(handle, "MSHookFunction");
+        g_MSFindSymbol   = (MSFindSymbol_t)dlsym(handle, "MSFindSymbol");
+    }
+    NSLog(@"[MCTweak] hook API 解析: MSHookFunction=%p MSFindSymbol=%p",
+          (void*)g_MSHookFunction, (void*)g_MSFindSymbol);
+    return (g_MSHookFunction != NULL);
 }
 
 /// 获取主可执行文件镜像基址（ASLR slide 后的真实地址）
@@ -249,6 +280,7 @@ static void MCApplyFeature(MCTFeature feat, BOOL on);
 static void MCProbeSymbols(void);
 static void MCInstallFullbrightHook(void);
 static void MCSetFullbrightHook(BOOL on);
+static BOOL MCResolveHookAPI(void);
 
 #pragma mark - ==================== 悬浮窗管理 ====================
 
@@ -675,8 +707,8 @@ static void MCSetFullbrightHook(BOOL on);
         }
         NSLog(@"[MCTweak] 已识别为 Minecraft 变体，开始初始化");
 
-        // 真正的 inline hook 基础设施：探测 C++ 符号 + 预装 Fullbright hook
-        // （Fullbright hook 在开关时才生效，这里仅安装基础设施）
+        // 真正的 inline hook 基础设施：解析 hook API + 探测 C++ 符号 + 预装 Fullbright hook
+        MCResolveHookAPI();
         NSLog(@"[MCTweak] 主镜像基址: 0x%lx", (unsigned long)MCMainImageBase());
         MCProbeSymbols();
         MCInstallFullbrightHook();
@@ -795,14 +827,18 @@ static char *hook_fgets(char *buf, int n, FILE *f) {
 static void MCInstallFullbrightHook(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
+        if (!g_MSHookFunction) {
+            NSLog(@"[MCTweak] MSHookFunction 不可用，Fullbright hook 未安装");
+            return;
+        }
         void *fopen_ptr = MCDlsym("fopen");
         void *fgets_ptr = MCDlsym("fgets");
         if (fopen_ptr) {
-            MSHookFunction(fopen_ptr, (void *)hook_fopen, (void **)&orig_fopen);
+            g_MSHookFunction(fopen_ptr, (void *)hook_fopen, (void **)&orig_fopen);
             NSLog(@"[MCTweak] 已 inline hook fopen @ %p", fopen_ptr);
         }
         if (fgets_ptr) {
-            MSHookFunction(fgets_ptr, (void *)hook_fgets, (void **)&orig_fgets);
+            g_MSHookFunction(fgets_ptr, (void *)hook_fgets, (void **)&orig_fgets);
             NSLog(@"[MCTweak] 已 inline hook fgets @ %p", fgets_ptr);
         }
     });
@@ -836,7 +872,7 @@ static void MCProbeSymbols(void) {
     ];
     NSMutableArray<NSString *> *found = [NSMutableArray array];
     for (NSString *sym in candidates) {
-        void *p = MSFindSymbol([sym UTF8String]);
+        void *p = g_MSFindSymbol ? g_MSFindSymbol([sym UTF8String]) : NULL;
         if (p) {
             [found addObject:sym];
             NSLog(@"[MCTweak] 符号命中: %@ @ %p", sym, p);

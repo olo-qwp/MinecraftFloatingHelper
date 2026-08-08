@@ -16,8 +16,7 @@ $(TWEAK_NAME)_FILES = Tweak.xm
 # 链接的框架
 $(TWEAK_NAME)_FRAMEWORKS = UIKit Foundation CoreGraphics QuartzCore
 
-# 链接 ellekit (提供 MSHookFunction/MSFindSymbol，Dopamine rootless hook 框架)
-$(TWEAK_NAME)_LIBRARIES = ellekit
+# ellekit 运行时由 Dopamine 注入，编译时不链接（用 dlsym 动态解析 MSHookFunction）
 
 # 启用ARC，忽略不必要的警告
 $(TWEAK_NAME)_CFLAGS = -fobjc-arc -Wno-c99-designator -Wno-unused-variable -Wno-deprecated-declarations -Wno-unused-function
