@@ -246,6 +246,9 @@ static void MCShowToast(NSString *msg);
 static void MCSetFullbright(BOOL on);
 static BOOL MCSendCommand(NSString *cmd);
 static void MCApplyFeature(MCTFeature feat, BOOL on);
+static void MCProbeSymbols(void);
+static void MCInstallFullbrightHook(void);
+static void MCSetFullbrightHook(BOOL on);
 
 #pragma mark - ==================== 悬浮窗管理 ====================
 
