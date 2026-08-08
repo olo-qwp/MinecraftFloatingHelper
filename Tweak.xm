@@ -766,6 +766,8 @@ static NSString *MCOptionsPath(void) {
 }
 
 static NSString *g_savedGamma = nil; // 保存原始 gamma，关闭时恢复
+static dispatch_source_t g_killAuraTimer = nil; // KillAura 循环攻击定时器
+static dispatch_source_t g_refreshTimer = nil;  // 持续效果刷新定时器
 
 static void MCSetFullbright(BOOL on) {
     NSString *path = MCOptionsPath();
@@ -860,38 +862,117 @@ static BOOL MCSendCommand(NSString *cmd) {
 
 #pragma mark - 功能派发
 
+#pragma mark - 持续效果刷新
+
+/// 持续效果（夜视/加速/防摔/抗性）刷新回调，防止效果到期
+static void MCRefreshEffects(NSTimer *t) {
+    if (g_featureEnabled[MCTFeatureFullbright]) MCSendCommand(@"effect @s night_vision 99999 255");
+    if (g_featureEnabled[MCTFeatureSpeed])      MCSendCommand(@"effect @s speed 99999 5");
+    if (g_featureEnabled[MCTFeatureNoFall])     MCSendCommand(@"effect @s slow_falling 99999 1");
+    if (g_featureEnabled[MCTFeatureAntiKB])     MCSendCommand(@"effect @s resistance 99999 5");
+}
+
+/// KillAura 循环：每 0.6s 清除半径 6 内所有非玩家/非掉落物实体
+static void MCKillAuraTick(NSTimer *t) {
+    // type=!player 排除玩家；r=6 限制范围避免误杀远处；不加 type 限制会杀被动生物
+    MCSendCommand(@"kill @e[type=!player,r=6]");
+}
+
+#pragma mark - 功能派发
+
 static void MCApplyFeature(MCTFeature feat, BOOL on) {
     switch (feat) {
+        // 夜视：优先用 night_vision 效果（最彻底，水底/洞穴全亮），options.txt 作后备
         case MCTFeatureFullbright:
-            MCSetFullbright(on);
+            if (on) {
+                MCSendCommand(@"effect @s night_vision 99999 255");
+                MCSetFullbright(YES); // 双保险：同时拉高 gamma
+            } else {
+                MCSendCommand(@"effect @s clear night_vision");
+                MCSetFullbright(NO);
+            }
             break;
 
+        // 飞行 = 创造模式（双击跳跃起飞）；需世界开启作弊
         case MCTFeatureFly:
-            // 飞行 = 创造模式（双击跳跃起飞）；需世界开启作弊
             MCSendCommand(on ? @"gamemode 1" : @"gamemode 0");
             break;
 
+        // 加速 = 速度效果 V 级
         case MCTFeatureSpeed:
-            MCSendCommand(on ? @"effect @s speed 99999 5" : @"effect @s clear");
+            MCSendCommand(on ? @"effect @s speed 99999 5" : @"effect @s clear speed");
+            break;
+
+        // 防摔 = 缓降效果（落地无伤）
+        case MCTFeatureNoFall:
+            MCSendCommand(on ? @"effect @s slow_falling 99999 1" : @"effect @s clear slow_falling");
+            break;
+
+        // 穿墙 = 旁观模式（可穿墙飞行，无敌）
+        case MCTFeatureNoClip:
+            MCSendCommand(on ? @"gamemode 3" : @"gamemode 0");
+            break;
+
+        // 防击退 = 抗性提升 V（减少击退与伤害）
+        case MCTFeatureAntiKB:
+            MCSendCommand(on ? @"effect @s resistance 99999 5" : @"effect @s clear resistance");
+            break;
+
+        // KillAura = 定时清除半径 6 内非玩家实体（伪 KillAura）
+        case MCTFeatureKillAura:
+            if (on) {
+                if (g_killAuraTimer) dispatch_source_cancel(g_killAuraTimer);
+                g_killAuraTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+                                                         dispatch_get_main_queue());
+                dispatch_source_set_timer(g_killAuraTimer, dispatch_time(DISPATCH_TIME_NOW, 0),
+                                          600 * NSEC_PER_MSEC, 200 * NSEC_PER_MSEC); // 0.6s
+                dispatch_source_set_event_handler(g_killAuraTimer, ^{
+                    MCKillAuraTick(nil);
+                });
+                dispatch_resume(g_killAuraTimer);
+                MCShowToast(@"KillAura 已开启（自动清怪，半径6，需作弊）");
+            } else {
+                if (g_killAuraTimer) {
+                    dispatch_source_cancel(g_killAuraTimer);
+                    g_killAuraTimer = nil;
+                }
+                MCShowToast(@"KillAura 已关闭");
+            }
             break;
 
         case MCTFeatureXRay:
             MCShowToast(on ? @"X-Ray 请配合 xray 资源包使用" : @"已关闭");
             break;
 
-        case MCTFeatureNoClip:
-        case MCTFeatureKillAura:
+        // 这些无对应命令，需 C++ 逆向，保持诚实提示
         case MCTFeatureESP:
-        case MCTFeatureNoFall:
         case MCTFeatureAutoMine:
         case MCTFeatureAutoEat:
         case MCTFeatureReach:
-        case MCTFeatureAntiKB:
         case MCTFeatureAutoTool:
-            MCShowToast(on ? @"此功能需逆向 C++ 偏移，当前版本暂不支持" : @"已关闭");
+            MCShowToast(on ? @"此功能需逆向 C++ 偏移，暂不支持" : @"已关闭");
             break;
 
         default:
             break;
+    }
+
+    // 启停持续效果刷新定时器（任一持续效果开启时启动，每 10 分钟刷新防到期）
+    BOOL needRefresh = g_featureEnabled[MCTFeatureFullbright] ||
+                       g_featureEnabled[MCTFeatureSpeed] ||
+                       g_featureEnabled[MCTFeatureNoFall] ||
+                       g_featureEnabled[MCTFeatureAntiKB];
+    if (needRefresh && !g_refreshTimer) {
+        g_refreshTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+                                                dispatch_get_main_queue());
+        dispatch_source_set_timer(g_refreshTimer, dispatch_time(DISPATCH_TIME_NOW, 0),
+                                  600 * NSEC_PER_SEC, 60 * NSEC_PER_SEC); // 10 分钟
+        dispatch_source_set_event_handler(g_refreshTimer, ^{
+            MCRefreshEffects(nil);
+        });
+        dispatch_resume(g_refreshTimer);
+    } else if (!needRefresh && g_refreshTimer) {
+        dispatch_source_cancel(g_refreshTimer);
+        g_refreshTimer = nil;
     }
 }
