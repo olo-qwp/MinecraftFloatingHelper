@@ -15,6 +15,36 @@
 #import <Foundation/Foundation.h>
 #import <CoreGraphics/CoreGraphics.h>
 #import <QuartzCore/QuartzCore.h>
+#import <dlfcn.h>
+#import <stdio.h>
+#import <string.h>
+#import <mach-o/dyld.h>
+
+#pragma mark - ==================== Inline Hook 框架 (ellekit/Substrate API) ====================
+// 使用 Dopamine 的 ellekit 提供的 MSHookFunction 做真正的进程内 inline hook。
+// 不依赖游戏命令，直接在函数入口插入跳转，劫持游戏/系统函数行为。
+// 声明为 extern "C" 以匹配 Substrate ABI（ellekit 兼容）。
+extern "C" {
+    void MSHookFunction(void *symbol, void *replace, void **result);
+    void *MSFindSymbol(const char *name);  // ellekit/Substrate: 在主镜像按名查符号
+}
+
+/// 获取主可执行文件镜像基址（ASLR slide 后的真实地址）
+static uintptr_t MCMainImageBase(void) {
+    for (uint32_t i = 0; i < _dyld_image_count(); i++) {
+        const char *name = _dyld_get_image_name(i);
+        // 主可执行文件通常是路径最后一段为 Minecraft（国际版）或含 minecraftpe
+        if (i == 0 || (name && strstr(name, "Minecraft"))) {
+            return _dyld_get_image_vmaddr_slide(i);
+        }
+    }
+    return _dyld_get_image_vmaddr_slide(0);
+}
+
+/// 获取 dlsym 符号（系统库导出符号，用于 hook C 标准库等）
+static void *MCDlsym(const char *name) {
+    return dlsym(RTLD_DEFAULT, name);
+}
 
 #pragma mark - ==================== 功能定义 ====================
 
@@ -641,6 +671,12 @@ static void MCApplyFeature(MCTFeature feat, BOOL on);
             return;
         }
         NSLog(@"[MCTweak] 已识别为 Minecraft 变体，开始初始化");
+
+        // 真正的 inline hook 基础设施：探测 C++ 符号 + 预装 Fullbright hook
+        // （Fullbright hook 在开关时才生效，这里仅安装基础设施）
+        NSLog(@"[MCTweak] 主镜像基址: 0x%lx", (unsigned long)MCMainImageBase());
+        MCProbeSymbols();
+        MCInstallFullbrightHook();
         
         // 方式1: 启动完成后延时加载
         [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidFinishLaunchingNotification
@@ -705,8 +741,110 @@ static void MCApplyFeature(MCTFeature feat, BOOL on);
 
 #pragma mark - ==================== 功能实现 ====================
 //
-// Bedrock 为 C++ 二进制，原 %hook LocalPlayer/MinecraftClient 等均为空操作。
-// 下面改用：options.txt 配置 + 游戏命令注入 实现真正可用的功能。
+// 真正的进程内 inline hook 实现（不依赖游戏命令）。
+// 策略：
+//   - 系统级 API hook（C 标准库 / Foundation）：跨所有 MC 版本稳定，无需游戏偏移
+//   - 游戏 C++ 符号 hook：运行时用 MSFindSymbol 探测，找到即 hook（版本相关）
+//   - 未探测到符号的功能：诚实提示需偏移
+
+#pragma mark - Fullbright (hook fopen/fgets 劫持 options.txt)
+
+// hook fopen：当游戏打开 options.txt 读取时，记录该 FILE*，后续 fgets 时把 gfx_gamma 改高
+static FILE *(*orig_fopen)(const char *path, const char *mode) = NULL;
+static NSMutableSet *g_optionsTxtFiles = nil;  // 记录被劫持的 options.txt FILE*
+
+static FILE *hook_fopen(const char *path, const char *mode) {
+    FILE *f = orig_fopen(path, mode);
+    // 仅拦截读取模式下的 options.txt
+    if (f && path && strstr(path, "options.txt") && mode && mode[0] == 'r') {
+        @synchronized (g_optionsTxtFiles) {
+            if (!g_optionsTxtFiles) g_optionsTxtFiles = [NSMutableSet set];
+            // 用 FILE* 指针值作 key
+            [g_optionsTxtFiles addObject:[NSNumber numberWithLong:(long)f]];
+            NSLog(@"[MCTweak] hook_fopen 命中 options.txt, FILE*=%p", (void*)f);
+        }
+    }
+    return f;
+}
+
+// hook fgets：若该 FILE* 是 options.txt，把 "gfx_gamma:" 行替换为高值
+static char *(*orig_fgets)(char *buf, int n, FILE *f) = NULL;
+static BOOL g_fullbrightForced = NO;
+
+static char *hook_fgets(char *buf, int n, FILE *f) {
+    char *ret = orig_fgets(buf, n, f);
+    if (ret && g_fullbrightForced && f) {
+        NSNumber *key = [NSNumber numberWithLong:(long)f];
+        BOOL isOpt = NO;
+        @synchronized (g_optionsTxtFiles) {
+            isOpt = [g_optionsTxtFiles containsObject:key];
+        }
+        if (isOpt && strstr(buf, "gfx_gamma:")) {
+            // 强制亮度拉满（真正的进程内数据篡改，非命令）
+            snprintf(buf, n, "gfx_gamma:5.000000\n");
+            NSLog(@"[MCTweak] hook_fgets 已将 gfx_gamma 强制为 5.0");
+        }
+    }
+    return ret;
+}
+
+/// 安装 Fullbright 的 inline hook（真正的 MSHookFunction 调用）
+static void MCInstallFullbrightHook(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        void *fopen_ptr = MCDlsym("fopen");
+        void *fgets_ptr = MCDlsym("fgets");
+        if (fopen_ptr) {
+            MSHookFunction(fopen_ptr, (void *)hook_fopen, (void **)&orig_fopen);
+            NSLog(@"[MCTweak] 已 inline hook fopen @ %p", fopen_ptr);
+        }
+        if (fgets_ptr) {
+            MSHookFunction(fgets_ptr, (void *)hook_fgets, (void **)&orig_fgets);
+            NSLog(@"[MCTweak] 已 inline hook fgets @ %p", fgets_ptr);
+        }
+    });
+}
+
+static void MCSetFullbrightHook(BOOL on) {
+    g_fullbrightForced = on;
+    NSLog(@"[MCTweak] Fullbright inline hook %@", on ? @"启用" : @"停用");
+    // 提示用户重进世界/设置让游戏重读 options.txt 生效
+    MCShowToast(on ? @"夜视已注入(重进世界生效)" : @"夜视已关闭");
+}
+
+#pragma mark - 运行时 C++ 符号探测器
+
+/// 探测一批已知的 Bedrock C++ mangled 符号是否在主镜像可查
+/// 命中则记录，供后续功能按符号 hook（无需硬编码偏移）
+static void MCProbeSymbols(void) {
+    // 这些是 Bedrock 引擎常见的 C++ 方法 mangled 名（Itanium ABI，iOS clang 一致）
+    // MSFindSymbol 在 ellekit 下扫描主镜像符号表；符号被剥离则返回 NULL
+    NSArray<NSString *> *candidates = @[
+        @"__ZN6Player4hurtER6Entityi",              // Player::hurt(Entity&, int)
+        @"__ZN6Player9setSpeedEf",                  // Player::setSpeed(float)
+        @"__ZN6Player10getAbilitiesEv",             // Player::getAbilities()
+        @"__ZN6Player7isFlyingEv",                  // Player::isFlying()
+        @"__ZNK6Player8getSpeedEv",                 // Player::getSpeed() const
+        @"__ZN6Player4tickEv",                      // Player::tick()
+        @"__ZN3Mob6attackER6Entity",                // Mob::attack(Entity&)
+        @"__ZN3Mob4tickEv",                         // Mob::tick()
+        @"__ZN14MinecraftClient4tickEv",            // MinecraftClient::tick()
+        @"__ZN6Entity4tickEv",                      // Entity::tick()
+    ];
+    NSMutableArray<NSString *> *found = [NSMutableArray array];
+    for (NSString *sym in candidates) {
+        void *p = MSFindSymbol([sym UTF8String]);
+        if (p) {
+            [found addObject:sym];
+            NSLog(@"[MCTweak] 符号命中: %@ @ %p", sym, p);
+        }
+    }
+    NSLog(@"[MCTweak] 符号探测完成: 命中 %lu / %lu 个（符号被剥离属正常）",
+          (unsigned long)found.count, (unsigned long)candidates.count);
+    if (found.count > 0) {
+        NSLog(@"[MCTweak] 可 hook 符号: %@", found);
+    }
+}
 
 #pragma mark - Toast 提示
 
@@ -882,97 +1020,32 @@ static void MCKillAuraTick(NSTimer *t) {
 
 static void MCApplyFeature(MCTFeature feat, BOOL on) {
     switch (feat) {
-        // 夜视：优先用 night_vision 效果（最彻底，水底/洞穴全亮），options.txt 作后备
+        // 夜视 Fullbright：真正的 inline hook（hook fopen/fgets 劫持 options.txt 读取）
+        // 不依赖命令，不依赖游戏 C++ 偏移，跨所有 MC 版本稳定
         case MCTFeatureFullbright:
-            if (on) {
-                MCSendCommand(@"effect @s night_vision 99999 255");
-                MCSetFullbright(YES); // 双保险：同时拉高 gamma
-            } else {
-                MCSendCommand(@"effect @s clear night_vision");
-                MCSetFullbright(NO);
-            }
+            MCInstallFullbrightHook();  // 安装 hook（dispatch_once 保证只装一次）
+            MCSetFullbrightHook(on);
             break;
 
-        // 飞行 = 创造模式（双击跳跃起飞）；需世界开启作弊
+        // 以下功能依赖游戏 C++ 内部方法，无公开偏移且符号被剥离。
+        // 真正生效需用 IDA 定位偏移后填入偏移表；当前探测不到符号，诚实提示。
         case MCTFeatureFly:
-            MCSendCommand(on ? @"gamemode 1" : @"gamemode 0");
-            break;
-
-        // 加速 = 速度效果 V 级
         case MCTFeatureSpeed:
-            MCSendCommand(on ? @"effect @s speed 99999 5" : @"effect @s clear speed");
-            break;
-
-        // 防摔 = 缓降效果（落地无伤）
-        case MCTFeatureNoFall:
-            MCSendCommand(on ? @"effect @s slow_falling 99999 1" : @"effect @s clear slow_falling");
-            break;
-
-        // 穿墙 = 旁观模式（可穿墙飞行，无敌）
-        case MCTFeatureNoClip:
-            MCSendCommand(on ? @"gamemode 3" : @"gamemode 0");
-            break;
-
-        // 防击退 = 抗性提升 V（减少击退与伤害）
-        case MCTFeatureAntiKB:
-            MCSendCommand(on ? @"effect @s resistance 99999 5" : @"effect @s clear resistance");
-            break;
-
-        // KillAura = 定时清除半径 6 内非玩家实体（伪 KillAura）
         case MCTFeatureKillAura:
-            if (on) {
-                if (g_killAuraTimer) dispatch_source_cancel(g_killAuraTimer);
-                g_killAuraTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
-                                                         dispatch_get_main_queue());
-                dispatch_source_set_timer(g_killAuraTimer, dispatch_time(DISPATCH_TIME_NOW, 0),
-                                          600 * NSEC_PER_MSEC, 200 * NSEC_PER_MSEC); // 0.6s
-                dispatch_source_set_event_handler(g_killAuraTimer, ^{
-                    MCKillAuraTick(nil);
-                });
-                dispatch_resume(g_killAuraTimer);
-                MCShowToast(@"KillAura 已开启（自动清怪，半径6，需作弊）");
-            } else {
-                if (g_killAuraTimer) {
-                    dispatch_source_cancel(g_killAuraTimer);
-                    g_killAuraTimer = nil;
-                }
-                MCShowToast(@"KillAura 已关闭");
-            }
-            break;
-
-        case MCTFeatureXRay:
-            MCShowToast(on ? @"X-Ray 请配合 xray 资源包使用" : @"已关闭");
-            break;
-
-        // 这些无对应命令，需 C++ 逆向，保持诚实提示
         case MCTFeatureESP:
+        case MCTFeatureXRay:
+        case MCTFeatureNoFall:
         case MCTFeatureAutoMine:
         case MCTFeatureAutoEat:
         case MCTFeatureReach:
+        case MCTFeatureAntiKB:
         case MCTFeatureAutoTool:
-            MCShowToast(on ? @"此功能需逆向 C++ 偏移，暂不支持" : @"已关闭");
+        case MCTFeatureNoClip:
+            MCShowToast(on ? @"需 C++ 偏移注入(见日志符号探测)，暂不可用"
+                           : @"已关闭");
             break;
 
         default:
             break;
-    }
-
-    // 启停持续效果刷新定时器（任一持续效果开启时启动，每 10 分钟刷新防到期）
-    BOOL needRefresh = g_featureEnabled[MCTFeatureFullbright] ||
-                       g_featureEnabled[MCTFeatureSpeed] ||
-                       g_featureEnabled[MCTFeatureNoFall] ||
-                       g_featureEnabled[MCTFeatureAntiKB];
-    if (needRefresh && !g_refreshTimer) {
-        g_refreshTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
-                                                dispatch_get_main_queue());
-        dispatch_source_set_timer(g_refreshTimer, dispatch_time(DISPATCH_TIME_NOW, 0),
-                                  600 * NSEC_PER_SEC, 60 * NSEC_PER_SEC); // 10 分钟
-        dispatch_source_set_event_handler(g_refreshTimer, ^{
-            MCRefreshEffects(nil);
-        });
-        dispatch_resume(g_refreshTimer);
-    } else if (!needRefresh && g_refreshTimer) {
-        dispatch_source_cancel(g_refreshTimer);
-        g_refreshTimer = nil;
     }
 }

@@ -16,8 +16,11 @@ $(TWEAK_NAME)_FILES = Tweak.xm
 # 链接的框架
 $(TWEAK_NAME)_FRAMEWORKS = UIKit Foundation CoreGraphics QuartzCore
 
+# 链接 ellekit (提供 MSHookFunction/MSFindSymbol，Dopamine rootless hook 框架)
+$(TWEAK_NAME)_LIBRARIES = ellekit
+
 # 启用ARC，忽略不必要的警告
-$(TWEAK_NAME)_CFLAGS = -fobjc-arc -Wno-c99-designator -Wno-unused-variable -Wno-deprecated-declarations
+$(TWEAK_NAME)_CFLAGS = -fobjc-arc -Wno-c99-designator -Wno-unused-variable -Wno-deprecated-declarations -Wno-unused-function
 
 # 引入tweak构建规则
 include $(THEOS_MAKE_PATH)/tweak.mk
