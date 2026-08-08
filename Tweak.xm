@@ -203,6 +203,20 @@ static MCPassThroughWindow *MCGetOverlayWindow(void) {
     return g_overlayWindow;
 }
 
+#pragma mark - ==================== 功能实现（前置声明） ====================
+// 重要：com.mojang.minecraftpe 是 C++ 二进制。LocalPlayer / MinecraftClient /
+// MoveInputHandler / Player 均为 C++ 类，不在 ObjC 运行时中，Logos %hook 对它们
+// 完全无效（objc_getClass 返回 nil，钩子永不触发）。因此本插件不再 %hook 这些类。
+// 可用实现路线：
+//   - 夜视 Fullbright：修改 options.txt 的 gfx_gamma（免逆向，最稳）
+//   - 飞行/加速：发送游戏命令 /gamemode、/effect（需世界开启作弊 + 聊天注入）
+//   - KillAura/ESP/X-Ray/Reach/Knockback 等：纯 C++ 逻辑，需 IDA+Dobby 偏移挂钩，
+//     本插件不提供无效代码，仅给出诚实提示。
+static void MCShowToast(NSString *msg);
+static void MCSetFullbright(BOOL on);
+static BOOL MCSendCommand(NSString *cmd);
+static void MCApplyFeature(MCTFeature feat, BOOL on);
+
 #pragma mark - ==================== 悬浮窗管理 ====================
 
 @interface MCFloatingManager : NSObject
@@ -576,7 +590,7 @@ static MCPassThroughWindow *MCGetOverlayWindow(void) {
     MCTFeature feat = (MCTFeature)(sender.tag - 3000);
     g_featureEnabled[feat] = sender.isOn;
     NSLog(@"[MCTweak] %@ -> %@", kFeatureNames[feat], sender.isOn ? @"ON" : @"OFF");
-    
+
     // 更新卡片样式
     UIView *row = [self.menuView viewWithTag:2000 + feat];
     if (row) {
@@ -590,6 +604,9 @@ static MCPassThroughWindow *MCGetOverlayWindow(void) {
             row.layer.borderWidth = 0;
         }
     }
+
+    // 派发到真实功能实现
+    MCApplyFeature(feat, sender.isOn);
 }
 
 @end
@@ -686,159 +703,193 @@ static MCPassThroughWindow *MCGetOverlayWindow(void) {
     }
 }
 
-#pragma mark - ==================== 游戏功能钩子 ====================
+#pragma mark - ==================== 功能实现 ====================
+//
+// Bedrock 为 C++ 二进制，原 %hook LocalPlayer/MinecraftClient 等均为空操作。
+// 下面改用：options.txt 配置 + 游戏命令注入 实现真正可用的功能。
 
-%hook LocalPlayer
+#pragma mark - Toast 提示
 
-- (BOOL)isFlying {
-    @try {
-        if (g_featureEnabled[MCTFeatureFly]) return YES;
-    } @catch(NSException *e) {}
-    return %orig;
-}
-
-- (float)movementSpeed {
-    @try {
-        if (g_featureEnabled[MCTFeatureSpeed]) {
-            float orig = %orig;
-            return orig * 3.5f;
+/// 在悬浮窗宿主上显示临时提示
+static void MCShowToast(NSString *msg) {
+    if (!msg) return;
+    MCExecOnMain(^{
+        UIView *host = g_floatingBtn.superview;
+        if (!host) host = (UIView *)MCGetOverlayWindow();
+        if (!host) {
+            for (UIWindow *w in [UIApplication sharedApplication].windows) {
+                if (!w.hidden) { host = w; break; }
+            }
         }
-    } @catch(NSException *e) {}
-    return %orig;
+        if (!host) return;
+
+        CGFloat sw = [UIScreen mainScreen].bounds.size.width;
+        UILabel *t = [[UILabel alloc] init];
+        t.text = msg;
+        t.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
+        t.textColor = [UIColor whiteColor];
+        t.backgroundColor = [UIColor colorWithRed:0.05 green:0.05 blue:0.10 alpha:0.92];
+        t.textAlignment = NSTextAlignmentCenter;
+        t.numberOfLines = 0;
+        t.layer.cornerRadius = 12;
+        t.layer.masksToBounds = YES;
+        [t sizeToFit];
+        CGRect f = t.frame;
+        f.size.width = MIN(sw - 32, f.size.width + 28);
+        f.size.height += 18;
+        f.origin.x = (sw - f.size.width) / 2.0;
+        f.origin.y = 80;
+        t.frame = f;
+        t.alpha = 0;
+        t.layer.zPosition = 10000;
+        [host addSubview:t];
+        [host bringSubviewToFront:t];
+
+        [UIView animateWithDuration:0.25 animations:^{ t.alpha = 1; }];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.8 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            [UIView animateWithDuration:0.3 animations:^{ t.alpha = 0; }
+                             completion:^(BOOL done) { [t removeFromSuperview]; }];
+        });
+    });
 }
 
-- (float)reachDistance {
+#pragma mark - 夜视 Fullbright（options.txt）
+
+/// options.txt 路径：<App容器>/Documents/games/com.mojang/minecraftpe/options.txt
+static NSString *MCOptionsPath(void) {
     @try {
-        if (g_featureEnabled[MCTFeatureReach]) {
-            float orig = %orig;
-            return MAX(orig, 6.0f);
-        }
-    } @catch(NSException *e) {}
-    return %orig;
+        NSArray *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+        if (docs.count == 0) return nil;
+        return [[docs firstObject] stringByAppendingPathComponent:@"games/com.mojang/minecraftpe/options.txt"];
+    } @catch (NSException *e) { return nil; }
 }
 
-%end
+static NSString *g_savedGamma = nil; // 保存原始 gamma，关闭时恢复
 
-%hook MoveInputHandler
+static void MCSetFullbright(BOOL on) {
+    NSString *path = MCOptionsPath();
+    if (!path) { MCShowToast(@"未找到 options.txt"); return; }
 
-- (BOOL)isFlying {
-    @try {
-        if (g_featureEnabled[MCTFeatureFly]) return YES;
-    } @catch(NSException *e) {}
-    return %orig;
-}
+    NSError *err = nil;
+    NSString *content = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:&err];
+    if (err || content.length == 0) { MCShowToast(@"读取 options.txt 失败"); return; }
 
-%end
-
-%hook MCPlayer
-
-- (float)knockbackResistance {
-    @try {
-        if (g_featureEnabled[MCTFeatureAntiKB]) return 1.0f;
-    } @catch(NSException *e) {}
-    return %orig;
-}
-
-- (float)gamma {
-    @try {
-        if (g_featureEnabled[MCTFeatureFullbright]) return 10.0f;
-    } @catch(NSException *e) {}
-    return %orig;
-}
-
-%end
-
-%hook MinecraftClient
-
-- (void)onTick {
-    %orig;
-    @autoreleasepool {
-        @try {
-            id me = (id)self;
-            // 持续性功能在每tick执行
-            id player = nil;
-            SEL localPlayerSel = NSSelectorFromString(@"localPlayer");
-            if ([me respondsToSelector:localPlayerSel]) {
-                #pragma clang diagnostic push
-                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                player = [me performSelector:localPlayerSel];
-                #pragma clang diagnostic pop
+    NSMutableArray *lines = [[content componentsSeparatedByString:@"\n"] mutableCopy];
+    BOOL found = NO;
+    for (NSUInteger i = 0; i < lines.count; i++) {
+        if ([lines[i] hasPrefix:@"gfx_gamma:"]) {
+            if (!g_savedGamma) {
+                NSString *v = [lines[i] substringFromIndex:@"gfx_gamma:".length];
+                g_savedGamma = [v stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+                if (g_savedGamma.length == 0) g_savedGamma = @"1.000000";
             }
-            if (!player) return;
-            
-            // KillAura
-            if (g_featureEnabled[MCTFeatureKillAura]) {
-                static int tick = 0;
-                tick++;
-                if (tick % 5 == 0) {
-                    SEL attackSel = NSSelectorFromString(@"attackNearestEntity");
-                    if ([player respondsToSelector:attackSel]) {
-                        #pragma clang diagnostic push
-                        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                        [player performSelector:attackSel];
-                        #pragma clang diagnostic pop
-                    }
-                }
-            }
-            
-            // AutoEat
-            if (g_featureEnabled[MCTFeatureAutoEat]) {
-                SEL hungerSel = NSSelectorFromString(@"hunger");
-                if ([player respondsToSelector:hungerSel]) {
-                    #pragma clang diagnostic push
-                    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                    id hungerVal = [player performSelector:hungerSel];
-                    float hunger = [hungerVal floatValue];
-                    #pragma clang diagnostic pop
-                    if (hunger < 18.0f) {
-                        SEL eatSel = NSSelectorFromString(@"eatBestFood");
-                        if ([player respondsToSelector:eatSel]) {
-                            #pragma clang diagnostic push
-                            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                            [player performSelector:eatSel];
-                            #pragma clang diagnostic pop
-                        }
-                    }
-                }
-            }
-            
-            // NoFall
-            if (g_featureEnabled[MCTFeatureNoFall]) {
-                SEL resetSel = NSSelectorFromString(@"resetFallDistance");
-                if ([player respondsToSelector:resetSel]) {
-                    #pragma clang diagnostic push
-                    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                    [player performSelector:resetSel];
-                    #pragma clang diagnostic pop
-                }
-            }
-            
-            // AutoTool
-            if (g_featureEnabled[MCTFeatureAutoTool]) {
-                SEL toolSel = NSSelectorFromString(@"selectBestTool");
-                if ([player respondsToSelector:toolSel]) {
-                    #pragma clang diagnostic push
-                    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                    [player performSelector:toolSel];
-                    #pragma clang diagnostic pop
-                }
-            }
-            
-            // AutoMine
-            if (g_featureEnabled[MCTFeatureAutoMine]) {
-                SEL speedSel = NSSelectorFromString(@"setBlockBreakSpeed:");
-                if ([player respondsToSelector:speedSel]) {
-                    #pragma clang diagnostic push
-                    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                    [player performSelector:speedSel withObject:@(100.0f)];
-                    #pragma clang diagnostic pop
-                }
-            }
-            
-        } @catch (NSException *e) {
-            // 静默捕获，防止崩溃
+            lines[i] = on ? @"gfx_gamma:5.000000"
+                          : [NSString stringWithFormat:@"gfx_gamma:%@", g_savedGamma];
+            found = YES;
+            break;
         }
     }
+    if (!found) {
+        if (!g_savedGamma) g_savedGamma = @"1.000000";
+        [lines addObject:on ? @"gfx_gamma:5.000000"
+                            : [NSString stringWithFormat:@"gfx_gamma:%@", g_savedGamma]];
+    }
+
+    NSString *out = [lines componentsJoinedByString:@"\n"];
+    NSError *werr = nil;
+    [out writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:&werr];
+    NSLog(@"[MCTweak] options.txt gfx_gamma -> %@ (writeErr=%@)", on ? @"5.0" : g_savedGamma, werr);
+    MCShowToast(on ? @"夜视已开启（如无变化请重进世界/设置）" : @"夜视已关闭");
 }
 
-%end
+#pragma mark - 命令注入
+
+/// 用响应者链捕获当前第一响应者（如已打开的聊天输入框）
+static __weak UIResponder *g_mcCurrentResponder = nil;
+
+@interface UIResponder (MCCapture)
+@end
+@implementation UIResponder (MCCapture)
+- (void)mc_captureFirstResponder:(id)sender {
+    g_mcCurrentResponder = self;
+}
+@end
+
+static UIResponder *MCGetCurrentResponder(void) {
+    g_mcCurrentResponder = nil;
+    UIWindow *kw = [UIApplication sharedApplication].keyWindow;
+    if (!kw) {
+        for (UIWindow *w in [UIApplication sharedApplication].windows) {
+            if (w.isKeyWindow) { kw = w; break; }
+        }
+    }
+    if (!kw) return nil;
+    @try {
+        [kw sendAction:@selector(mc_captureFirstResponder:) to:nil from:nil forEvent:nil];
+    } @catch (NSException *e) {}
+    return g_mcCurrentResponder;
+}
+
+/// 发送一条游戏命令。优先向当前聊天输入框注入文本；否则复制到剪贴板。
+/// 注意：Bedrock 聊天发送由游戏内 C++ 按钮处理，注入文本后仍需玩家按发送键，
+/// 或在世界开启作弊后用剪贴板粘贴发送。
+static BOOL MCSendCommand(NSString *cmd) {
+    if (!cmd) return NO;
+    if (![cmd hasPrefix:@"/"]) cmd = [NSString stringWithFormat:@"/%@", cmd];
+
+    UIResponder *fr = MCGetCurrentResponder();
+    if (fr && [fr conformsToProtocol:@protocol(UITextInput)]) {
+        id<UITextInput> ti = (id<UITextInput>)fr;
+        @try { [ti insertText:cmd]; } @catch (NSException *e) {}
+        // 尝试用回车发送（部分版本生效）
+        @try { [ti insertText:@"\n"]; } @catch (NSException *e) {}
+        NSLog(@"[MCTweak] 命令已注入聊天框: %@", cmd);
+        MCShowToast(@"已填入命令，如未发送请手动按发送键");
+        return YES;
+    }
+
+    // 后备：复制到剪贴板
+    [UIPasteboard generalPasteboard].string = cmd;
+    NSLog(@"[MCTweak] 聊天框未打开，命令已复制到剪贴板: %@", cmd);
+    MCShowToast(@"已复制命令，请打开聊天粘贴并发送（需开启作弊）");
+    return NO;
+}
+
+#pragma mark - 功能派发
+
+static void MCApplyFeature(MCTFeature feat, BOOL on) {
+    switch (feat) {
+        case MCTFeatureFullbright:
+            MCSetFullbright(on);
+            break;
+
+        case MCTFeatureFly:
+            // 飞行 = 创造模式（双击跳跃起飞）；需世界开启作弊
+            MCSendCommand(on ? @"gamemode 1" : @"gamemode 0");
+            break;
+
+        case MCTFeatureSpeed:
+            MCSendCommand(on ? @"effect @s speed 99999 5" : @"effect @s clear");
+            break;
+
+        case MCTFeatureXRay:
+            MCShowToast(on ? @"X-Ray 请配合 xray 资源包使用" : @"已关闭");
+            break;
+
+        case MCTFeatureNoClip:
+        case MCTFeatureKillAura:
+        case MCTFeatureESP:
+        case MCTFeatureNoFall:
+        case MCTFeatureAutoMine:
+        case MCTFeatureAutoEat:
+        case MCTFeatureReach:
+        case MCTFeatureAntiKB:
+        case MCTFeatureAutoTool:
+            MCShowToast(on ? @"此功能需逆向 C++ 偏移，当前版本暂不支持" : @"已关闭");
+            break;
+
+        default:
+            break;
+    }
+}
